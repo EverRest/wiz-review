@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -3652,6 +3653,121 @@ class BenchTests(TempHome):
         with self.assertRaises(SystemExit):
             self.run_bench(model="--dangerous")
 
+
+
+class ReviewWithMyOwnSessionTests(TempHome):  # review-with-me: gather the packet, publish only what the human approved
+    P = "group/m-seq"  # origin stays the local stand-in: nothing here may reach a real GitLab
+
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.tmp.name) / "code"
+        self.root.mkdir()
+        self.bare = Path(self.tmp.name) / "origin.git"  # a local stand-in for GitLab with the MR ref
+        _git(str(self.root), "init", "-q", "--bare", "-b", "main", str(self.bare))
+        seed = Path(self.tmp.name) / "seed"
+        _git(str(self.root), "init", "-q", "-b", "main", str(seed))
+        Path(seed, "a.py").write_text("x\n")
+        _git(str(seed), "add", ".")
+        _git(str(seed), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+        self.base = _git(str(seed), "rev-parse", "HEAD")
+        _git(str(seed), "checkout", "-q", "-b", "mr")
+        Path(seed, "a.py").write_text("x\ny\n")
+        _git(str(seed), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "change")
+        self.head = _git(str(seed), "rev-parse", "HEAD")
+        _git(str(seed), "push", "-q", str(self.bare), "main", "mr:refs/merge-requests/142/head")
+        self.clone = self.root / "r"
+        _git(str(self.root), "clone", "-q", str(self.bare), str(self.clone))
+        self.clone_head = _git(str(self.clone), "rev-parse", "HEAD")
+        (self.home / "repos.json").write_text(json.dumps({self.P: str(self.clone)}))
+
+    class GL:
+        def __init__(self, base, head):
+            self.refs = {"base_sha": base, "start_sha": base, "head_sha": head}
+            self.posted, self.created, self.deleted, self.published = [], [], [], []
+            self._id = 500
+
+        def username(self):
+            return "pavlo"
+
+        def mr(self, project, iid):
+            return {"diff_refs": self.refs, "target_branch": "main", "title": "Fix pay", "description": "",
+                    "web_url": URL, "sha": self.refs["head_sha"], "author": {"username": "olena"}, "reviewers": []}
+
+        def notes(self, project, iid):
+            return []
+
+        def discussions(self, project, iid):
+            return []
+
+        def post_note(self, project, iid, body):
+            self.posted.append(body)
+
+        def create_draft(self, project, iid, body, position=None):
+            self._id += 1
+            d = {"id": self._id, "note": body, "position": position}
+            self.created.append(d)
+            return d
+
+        def delete_draft(self, project, iid, draft_id):
+            self.deleted.append(draft_id)
+
+        def publish_draft(self, project, iid, draft_id):
+            self.published.append(draft_id)
+
+    def gl(self):
+        return self.GL(self.base, self.head)
+
+    def approved(self, **over):
+        f = {"path": "a.py", "line": 2, "severity": "important", "confidence": "high", "body": "This branch drops the check."}
+        f.update(over)
+        return {"summary": "Looks risky.", "findings": [f], "agent": {"tool": "Claude Code", "model": "opus-5-5"}}
+
+    def test_mr_context_returns_the_packet_and_calls_no_model(self):
+        gl = self.gl()
+        with mock.patch.object(wr, "claude_pass", side_effect=AssertionError("no model call")) as cp:
+            out = wr.mr_context(gl, URL)
+        cp.assert_not_called()
+        self.assertEqual(gl.posted, [])
+        self.assertEqual((out["iid"], out["project"], out["title"]), (142, self.P, "Fix pay"))
+        self.assertEqual(out["files"], ["a.py"])
+        self.assertEqual((out["base_sha"], out["head_sha"]), (self.base, self.head))
+        self.assertIn("y", out["packet"])  # the added line is in the packet
+        self.assertEqual(_git(str(self.clone), "rev-parse", "HEAD"), self.clone_head)  # reviewer's branch untouched
+        self.assertEqual(_git(str(self.clone), "for-each-ref", "refs/wiz-review"), "")  # refs cleaned up
+
+    def test_mr_context_refuses_without_a_local_clone(self):
+        (self.home / "repos.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "no local checkout"):
+            wr.mr_context(self.gl(), URL)
+
+    def test_publish_creates_drafts_only_with_the_tag(self):
+        gl = self.gl()
+        out = wr.publish_findings(gl, URL, self.approved())
+        self.assertEqual(gl.published, [])
+        self.assertEqual(gl.posted, [])
+        self.assertEqual(out["drafts"], len(gl.created))
+        self.assertGreaterEqual(len(gl.created), 2)  # the inline finding on a.py:2 and the summary draft
+        self.assertTrue(all("🤖 _wiz-review · Claude Code · opus-5-5_" in d["note"] for d in gl.created))
+        self.assertIsNotNone(gl.created[0]["position"])  # anchored on the new line
+
+    def test_publish_refuses_anything_outside_the_schema(self):
+        gl = self.gl()
+        with self.assertRaisesRegex(ValueError, "schema"):
+            wr.publish_findings(gl, URL, self.approved(severity="blocker"))
+        with self.assertRaisesRegex(ValueError, "schema"):
+            wr.publish_findings(gl, URL, {"summary": "x"})
+        self.assertEqual(gl.created, [])
+
+    def test_publish_refuses_a_secret_and_writes_nothing(self):
+        gl = self.gl()
+        with self.assertRaises(wr.SecretLeak):
+            wr.publish_findings(gl, URL, self.approved(body="token glpat-abcdefghijklmnop1234 here"))
+        self.assertEqual(gl.created, [])
+
+    def test_publish_refuses_without_a_local_clone(self):
+        (self.home / "repos.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "no local checkout"):
+            wr.publish_findings(self.gl(), URL, self.approved())
 
 
 if __name__ == "__main__":

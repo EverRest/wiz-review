@@ -1185,6 +1185,16 @@ def _norm_path(path, repo):
     return path
 
 
+def _finding_ok(f):
+    """One finding in the schema the reviewer's Claude and `publish-findings` both must meet."""
+    return (isinstance(f, dict) and isinstance(f.get("path"), str) and bool(PATH_RE.match(f["path"]))
+            and type(f.get("line")) is int and f["line"] >= 1
+            and f.get("severity") in ("critical", "important", "minor")
+            and f.get("confidence") in ("high", "medium", "low")
+            and isinstance(f.get("body"), str) and bool(f["body"].strip())
+            and isinstance(f.get("suggestion", ""), str))
+
+
 def extract_findings(stdout, repo=None):
     """Parse `claude -p --output-format json` output -> (findings, {"cost_usd", "turns", "dropped"}).
     Malformed findings are dropped one by one; only a missing/garbled result fails the run."""
@@ -1215,13 +1225,7 @@ def extract_findings(stdout, repo=None):
     for f in obj["findings"]:
         if isinstance(f, dict):
             f = {**f, "path": _norm_path(f.get("path"), repo)}
-        ok = (isinstance(f, dict) and isinstance(f.get("path"), str) and PATH_RE.match(f["path"])
-              and type(f.get("line")) is int and f["line"] >= 1
-              and f.get("severity") in ("critical", "important", "minor")
-              and f.get("confidence") in ("high", "medium", "low")
-              and isinstance(f.get("body"), str) and f["body"].strip()
-              and isinstance(f.get("suggestion", ""), str))
-        if not ok:
+        if not _finding_ok(f):
             dropped += 1
             continue
         clean.append({k: f[k] for k in ("path", "line", "severity", "confidence", "body", "suggestion") if k in f})
@@ -2689,6 +2693,55 @@ def pin_head(repo, iid, sha):
                           cwd=repo, capture_output=True).returncode == 0
 
 
+def review_packet(gl, job, mr, refs, cfg, repo):
+    """The packet a review reads, built the same way for the background review and for `mr-context`.
+    -> {packet, pst, meta, siblings, fam, full}. Calls no model; writes nothing to GitLab."""
+    project, iid = job["project"], int(job["iid"])
+    full = _git_out(diff_args(iid, refs["base_sha"]), repo)
+    since = job.get("since")
+    if since and subprocess.run(["git", "merge-base", "--is-ancestor", _check(SHA_RE, since, "sha"),
+                                 f"refs/wiz-review/{iid}"], cwd=repo).returncode != 0:
+        since = None  # history was rewritten: review everything again
+    shown = _git_out(diff_args(iid, since), repo) if since else full
+    all_notes = gl.notes(project, iid)
+    req_ids = {m.note_id for m in parse_markers(all_notes) if m.kind == "request" and m.author == _user(mr["author"])}
+    req = next((n["body"] for n in reversed(all_notes) if n.get("id") in req_ids), "")
+    meta = {"url": job["url"], "title": mr.get("title", ""), "target": mr["target_branch"], "base": since or refs["base_sha"],
+            **packet_context(gl, project, iid, mr, repo, since or refs["base_sha"], refs["head_sha"])}
+    siblings, missing = context_dirs(project, repo, cfg)
+    if missing:
+        print(f"context_repos without a local clone (skipped): {', '.join(missing)}", file=sys.stderr)
+    if siblings:
+        meta["siblings"] = siblings
+    rctx = reviewer_context(project, repo, refs["base_sha"], full, cfg, job["kind"])
+    fam = rctx.pop("familiarity", None)
+    if "familiarity" in cfg.get("_ablate", ()):  # bench only
+        fam = None
+    try:  # repo-owned guides: read from the MR's BASE, so the MR itself cannot rewrite the guides that judge it
+        guides = [] if "guides" in cfg.get("_ablate", ()) else area_guides(
+            repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
+    except Exception as e:
+        guides = []
+        print(f"area guides left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
+    if guides:
+        meta["guides"] = guides
+    if cfg.get("fix_history", True):  # repo history: every kind of review, on the base (MR commits excluded)
+        try:
+            fixes = past_fixes(repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
+        except Exception as e:
+            fixes = []
+            print(f"past fixes left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
+        if fixes:
+            meta["fixes"] = fixes
+    if job["kind"] == "review":
+        meta.update(rctx, **({"familiarity": fam} if fam else {}))
+    packet, pst = build_packet(meta, req, shown, cfg, since, load_lessons(project), job["kind"])
+    if wide_diff(pst["changed_lines"], cfg):  # same changes, whole functions around them (anchors use `full`)
+        packet, pst = build_packet(meta, req, _git_out(diff_args(iid, since or refs["base_sha"], wide=True), repo),
+                                   cfg, since, load_lessons(project), job["kind"])
+    return {"packet": packet, "pst": pst, "meta": meta, "siblings": siblings, "fam": fam, "full": full}
+
+
 def run_job(job, gl=None, cfg=None):
     cfg, gl = cfg or load_config(), gl or gitlab_from_env()
     project, iid, repo = job["project"], int(job["iid"]), job["repo"]
@@ -2706,50 +2759,10 @@ def run_job(job, gl=None, cfg=None):
             _fetch(fetch_args(iid, mr["target_branch"]), repo)
             if not pin_head(repo, iid, refs["head_sha"]):  # GitLab hasn't recomputed diff_refs yet: the retry will
                 raise RuntimeError("MR head moved during review and diff_refs are not updated yet")
-        full = _git_out(diff_args(iid, refs["base_sha"]), repo)
-        since = job.get("since")
-        if since and subprocess.run(["git", "merge-base", "--is-ancestor", _check(SHA_RE, since, "sha"),
-                                     f"refs/wiz-review/{iid}"], cwd=repo).returncode != 0:
-            since = None  # history was rewritten: review everything again
-        shown = _git_out(diff_args(iid, since), repo) if since else full
-        all_notes = gl.notes(project, iid)
-        req_ids = {m.note_id for m in parse_markers(all_notes) if m.kind == "request" and m.author == _user(mr["author"])}
-        req = next((n["body"] for n in reversed(all_notes) if n.get("id") in req_ids), "")
-        meta = {"url": job["url"], "title": mr.get("title", ""), "target": mr["target_branch"], "base": since or refs["base_sha"],
-                **packet_context(gl, project, iid, mr, repo, since or refs["base_sha"], refs["head_sha"])}
-        siblings, missing = context_dirs(project, repo, cfg)
-        if missing:
-            print(f"context_repos without a local clone (skipped): {', '.join(missing)}", file=sys.stderr)
-        if siblings:
-            meta["siblings"] = siblings
-        rctx = reviewer_context(project, repo, refs["base_sha"], full, cfg, job["kind"])
-        fam = rctx.pop("familiarity", None)
-        if "familiarity" in cfg.get("_ablate", ()):  # bench only
-            fam = None
+        r = review_packet(gl, job, mr, refs, cfg, repo)
+        packet, pst, meta, siblings, fam, full = r["packet"], r["pst"], r["meta"], r["siblings"], r["fam"], r["full"]
         if fam:
             rec["familiarity"] = fam["level"]  # stats split the kept-rate by it (going forward)
-        try:  # repo-owned guides: read from the MR's BASE, so the MR itself cannot rewrite the guides that judge it
-            guides = [] if "guides" in cfg.get("_ablate", ()) else area_guides(
-                repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
-        except Exception as e:
-            guides = []
-            print(f"area guides left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-        if guides:
-            meta["guides"] = guides
-        if cfg.get("fix_history", True):  # repo history: every kind of review, on the base (MR commits excluded)
-            try:
-                fixes = past_fixes(repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
-            except Exception as e:
-                fixes = []
-                print(f"past fixes left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-            if fixes:
-                meta["fixes"] = fixes
-        if job["kind"] == "review":
-            meta.update(rctx, **({"familiarity": fam} if fam else {}))
-        packet, pst = build_packet(meta, req, shown, cfg, since, load_lessons(project), job["kind"])
-        if wide_diff(pst["changed_lines"], cfg):  # same changes, whole functions around them (anchors use `full`)
-            packet, pst = build_packet(meta, req, _git_out(diff_args(iid, since or refs["base_sha"], wide=True), repo),
-                                       cfg, since, load_lessons(project), job["kind"])
         rec.update(diff_lines=pst["changed_lines"], truncated=pst["truncated"])
         if pst["changed_lines"] == 0:
             findings = {"summary": "Немає змін для рев'ю (лише згенеровані або lock-файли).", "findings": [],
@@ -2786,6 +2799,81 @@ def run_job(job, gl=None, cfg=None):
         log_metric(rec)
         pid.unlink(missing_ok=True)
     return 1 if rec.get("error") else 0
+
+
+# --- review in your own session: the script gathers and publishes, your Claude reads and decides ----------
+
+def _need_checkout(project, cfg):
+    repo = find_repo(project, cfg)
+    if not repo:
+        raise ValueError(f"no local checkout for {project}; clone it under one of the `roots` in ~/.wiz-review/config.json")
+    return repo
+
+
+def _checkout_mr(gl, project, iid, repo):
+    """The MR's own refs, fetched and pinned to the head GitLab reports. Never the reviewer's branch or working tree."""
+    mr = gl.mr(project, iid)
+    refs = {k: mr["diff_refs"][k] for k in ("base_sha", "start_sha", "head_sha")}
+    _fetch(fetch_args(iid, mr["target_branch"]), repo)
+    if not pin_head(repo, iid, refs["head_sha"]):
+        raise ValueError("the MR head moved while fetching; run the command again")
+    return mr, refs
+
+
+def mr_context(gl, url, cfg=None):
+    """`mr-context`: what a review would read, as one JSON object. Fetches the refs and builds the packet; calls no
+    model and posts nothing."""
+    project, iid = _parse_url(url)
+    cfg = cfg or load_config()
+    repo = _need_checkout(project, cfg)
+    mr, refs = _checkout_mr(gl, project, iid, repo)
+    job = {"kind": "review", "project": project, "iid": iid, "url": url, "repo": repo, "since": None}
+    try:
+        r = review_packet(gl, job, mr, refs, cfg, repo)
+        files = [f[0] for f in diff_files(r["full"], cfg["exclude"])]
+    finally:
+        for args in cleanup_args(iid):
+            subprocess.run(args, cwd=repo, capture_output=True)
+    return {"iid": iid, "project": project, "title": mr.get("title", ""), "base_sha": refs["base_sha"],
+            "head_sha": refs["head_sha"], "diff_refs": refs, "files": files, "packet": r["packet"]}
+
+
+def publish_findings(gl, url, findings, cfg=None):
+    """`publish-findings`: the findings you approved become DRAFT notes. No review note, no snapshot, no autopublish:
+    you still publish or delete each one in GitLab. The same schema, scrubbing and tag as a background review."""
+    project, iid = _parse_url(url)
+    cfg = cfg or load_config()
+    if (not isinstance(findings, dict) or not isinstance(findings.get("summary"), str)
+            or not isinstance(findings.get("findings"), list) or not all(_finding_ok(f) for f in findings["findings"])):
+        raise ValueError("findings do not match the schema: {summary, findings: [{path, line, severity, confidence, body, suggestion?}]}")
+    texts = [findings["summary"]] + [f["body"] + f.get("suggestion", "") for f in findings["findings"]]
+    if any(find_secrets(t, [getattr(gl, "_token", None)]) for t in texts):
+        raise SecretLeak("findings contain something that looks like a secret; nothing was posted")
+    repo = _need_checkout(project, cfg)
+    _, refs = _checkout_mr(gl, project, iid, repo)
+    try:
+        full = _git_out(diff_args(iid, refs["base_sha"]), repo)
+    finally:
+        for args in cleanup_args(iid):
+            subprocess.run(args, cwd=repo, capture_output=True)
+    inline, summary = plan_notes(findings, parse_diff(full), refs, cfg)
+    created = []
+    try:
+        for item in inline:
+            try:
+                created.append(gl.create_draft(project, iid, item["note"], item["position"]))
+            except GitLabError:  # GitLab refused the anchor: keep the finding, lose only the position
+                summary += "\n\n" + _line(item["finding"])
+        created.append(gl.create_draft(project, iid, "**wiz-review — підсумок**\n\n" + summary
+                                      + f"\n\n{agent_tag(findings.get('agent'))}"))
+    except Exception:  # all or nothing, like a background round
+        for d in created:
+            try:
+                gl.delete_draft(project, iid, d["id"])
+            except Exception:
+                pass
+        raise
+    return {"drafts": len(created), "project": project, "iid": iid}
 
 
 # --- scheduling / diagnostics ---------------------------------------------------------
@@ -2964,6 +3052,11 @@ def main(argv=None):
     g.add_argument("--backfill", action="store_true", required=True, help="read my own comments on recent merged MRs")
     g.add_argument("--project", help="default: the project of the repo in the current directory")
     g.add_argument("--limit", type=int, default=30, help="merged MRs to read (1-100)")
+    g = sub.add_parser("mr-context", help="review-with-me: what a review reads, as JSON; calls no model, posts nothing")
+    g.add_argument("--url", required=True)
+    g = sub.add_parser("publish-findings", help="review-with-me: approved findings become draft notes, never published")
+    g.add_argument("--url", required=True)
+    g.add_argument("--input", required=True, help="JSON file with summary + findings (the background review's schema)")
     g = sub.add_parser("precheck")
     g.add_argument("--target", required=True)
     g.add_argument("--model", help="model for this check only")
@@ -3001,6 +3094,15 @@ def main(argv=None):
             print(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {line}")
     elif a.cmd == "run":
         return run_job(json.loads(Path(a.job).read_text()))
+    elif a.cmd in ("mr-context", "publish-findings"):
+        try:
+            if a.cmd == "mr-context":
+                out = mr_context(gitlab_from_env(), a.url)
+            else:
+                out = publish_findings(gitlab_from_env(), a.url, json.loads(Path(a.input).read_text(encoding="utf-8")))
+        except (ValueError, SecretLeak, GitLabError, json.JSONDecodeError) as e:
+            raise SystemExit(f"error: {e}")
+        print(json.dumps(out, ensure_ascii=False))
     elif a.cmd == "review" and a.dry_run:
         print(dry_review(gitlab_from_env(), a.url, model=a.model))
     elif a.cmd == "review":  # manual: review this MR now, whether or not the author asked

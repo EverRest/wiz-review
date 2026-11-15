@@ -369,6 +369,8 @@ WR="python3 $(find ~/.claude/plugins -name wiz_review.py | head -1)"
 | `$WR doctor` | Diagnostics: token, GitLab, `claude`, repos, schedule. |
 | `$WR stats` | The number of reviews and errors, **tokens**, **cost in USD**, average time, and the split by model. Also, per model: how many agent drafts reviewers kept, a comparison hint when the data is enough, and the kept-rate by familiarity level. |
 | `$WR tick` | Runs one polling pass by hand. |
+| `$WR mr-context --url <MR url>` | Review in your own session: prints the MR and the packet a review would read, as JSON. Calls no model, posts nothing. |
+| `$WR publish-findings --url <MR url> --input <file.json>` | Review in your own session: the findings you approved become **draft** notes. Nothing is published; you still click Submit in GitLab. |
 | `$WR login` | Saves or replaces the token. |
 | `$WR repos --root ~/code --root ~/work` | Sets the clone folders and rescans them. |
 | `$WR schedule` / `schedule --install` / `schedule --remove` | Shows, installs, or removes the background run. |
@@ -383,6 +385,17 @@ WR="python3 $(find ~/.claude/plugins -name wiz_review.py | head -1)"
 | `$WR lessons add --project group/repo --text "…"` | Saves a rule for the repo in your own words, for example "do not flag missing return types in tests". The only way to create a lesson. Max 500 characters; text with a secret is refused. |
 | `$WR lessons list [--project group/repo]` | Shows the lessons, numbered. `used: true` marks the last 10, which go with every review, worded as rules you wrote. Lessons that older versions (before 0.6.0) saved from deleted drafts are still there and are sent as rules too: check them and `forget` the wrong ones. |
 | `$WR lessons forget --project group/repo --n 3 [--n 5]` / `--all` | Removes lessons that teach the wrong thing, for example an old automatic one. |
+
+## Reviewing in your own session
+
+`/wiz-review:review-with-me <MR>` is for an MR you want to review yourself, with everything your Claude knows: your memory, MCP servers, Jira, the cluster. The script fetches the MR and builds the same packet a background review gets (`mr-context`). Your Claude reads the code and proposes findings. You approve them, and only then they become draft notes (`publish-findings`).
+
+Differences from the background review:
+- You are in the loop, so nothing runs unattended and nothing is published without your yes.
+- Your session's context is used, so the model can know more than the background review's restricted run.
+- It costs your session's usage, not a separate model call.
+
+It does not change who approves: you still approve in GitLab, and the plugin never approves or merges.
 
 ## 8. If something goes wrong
 
