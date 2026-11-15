@@ -552,7 +552,7 @@ class AlertTests(TempHome):
         self.assertEqual(got, [True])
 
     def test_notify_command_with_and_without_sound(self):
-        plain, loud = wr.notify_cmd("hi", False), wr.notify_cmd("hi", True)
+        plain, loud = wr.notify_cmd("hi", False, platform="darwin"), wr.notify_cmd("hi", True, platform="darwin")
         self.assertEqual(plain[0], "osascript")
         self.assertNotIn("sound name", " ".join(plain))
         self.assertIn('sound name "Glass"', " ".join(loud))
