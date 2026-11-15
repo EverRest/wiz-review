@@ -1841,7 +1841,8 @@ def open_mr(gl, args):
 
 MAX_CRITERIA, MAX_CRITERION_CHARS = 10, 300
 MAX_DECISIONS_CHARS = 1500
-def request_note(why, tested, questions, criteria=None, decisions=None, clone_project=None):
+MAX_RELATED = 5
+def request_note(why, tested, questions, criteria=None, decisions=None, clone_project=None, related=None):
     """criteria: acceptance criteria the author approved (free text); they go to every reviewer.
     decisions: the author's approved 'decisions and trade-offs' text (claims for the reviewer to verify)."""
     if not (why or "").strip() or not (tested or "").strip():
@@ -1857,6 +1858,17 @@ def request_note(why, tested, questions, criteria=None, decisions=None, clone_pr
         raise ValueError("decisions must be a string")
     if (decisions or "").strip():
         text += "\n**Рішення і компроміси:**\n" + decisions.strip()[:MAX_DECISIONS_CHARS]
+    if related is not None and (not isinstance(related, list) or not all(isinstance(u, str) for u in related)):
+        raise ValueError("related must be a list of MR links")
+    links = []
+    for u in related or []:
+        u = u.strip()
+        if not MR_URL_RE.match(u):  # only merge requests on our GitLab: no arbitrary links into the note
+            raise ValueError(f"related MR is not a merge request link on {GITLAB_HOST}: {u[:120]}")
+        links.append(u)
+    if links:  # linked MRs, possibly in other repos: the review does NOT check their state, the reviewer does
+        text += "\n**Пов'язані MR** (можуть бути в інших репо; цей рев'ю їхній стан не перевіряє):\n" + \
+                "\n".join(f"- {u}" for u in links[:MAX_RELATED])
     if clone_project:  # the reviewer has no local clone yet: say so before the pickup, not after "no local checkout"
         text += (f"\n**Перед рев'ю:** у вас немає клону `{clone_project}`. Клонуйте його в папку, яка входить до ваших "
                  f"`roots` (`repos --root <папка>`). Без клону рев'ю не почнеться.")
@@ -1868,7 +1880,8 @@ def request_note(why, tested, questions, criteria=None, decisions=None, clone_pr
 def request_review(gl, args):
     project, iid = _parse_url(args["url"])
     text = request_note(args.get("why"), args.get("tested"), args.get("questions"), args.get("criteria"),
-                        args.get("decisions"), clone_project=project if args.get("reviewer_needs_clone") else None)
+                        args.get("decisions"), clone_project=project if args.get("reviewer_needs_clone") else None,
+                        related=args.get("related"))
     if args.get("reviewers"):
         gl.set_reviewers(project, iid, args["reviewers"])
     reviewers = [_user(r) for r in gl.mr(project, iid).get("reviewers") or []]
