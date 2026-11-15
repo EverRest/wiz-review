@@ -475,6 +475,7 @@ Measured values (a local run, a change of about 15 lines of PHP): `haiku` ≈ **
 ```bash
 python3 -m unittest tests/test_wiz_review.py -v     # unit tests (no network)
 python3 tests/e2e_local.py                           # two "machines" + a fake GitLab on localhost + a real claude (≈ $0.05, ≈ 3 minutes)
+PATH="$PWD/tests/stub_claude:$PATH" python3 tests/e2e_local.py   # the same flow with a stub claude: no model call, no cost, no limits
 claude plugin validate .                             # plugin check
 WIZ_REVIEW_FAST=1 python3 bin/wiz_review.py tick     # divides all timers by 30
 ```

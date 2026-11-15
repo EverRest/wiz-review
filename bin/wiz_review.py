@@ -514,6 +514,16 @@ def repo_settings(text):
     return out
 
 
+def team_head(gl, project):
+    """The default branch head the team file is read at, or None. The team file is optional: when GitLab cannot tell,
+    the review runs without it (logged once). It never fails a review or a tick."""
+    try:
+        return gl.team_head(project)
+    except (GitLabError, OSError) as e:
+        _warn_once(f"team settings not read for {project}: {type(e).__name__}")
+        return None
+
+
 def apply_team(cfg, team):
     """defaults < machine config.json < the repo's team file. The repo can add to the machine's rules, never remove them:
     exclude and lenses are unions, require_green_ci only turns on, skip_if_diff_lines_over only lowers."""
@@ -2259,9 +2269,12 @@ def _tick_one(gl, cfg, ctx, role, step, raw, now):
     if r.get("seen") == info["updated_at"] and not due and not r.get("deferred"):
         return None
     notes = gl.notes(info["project"], info["iid"])
-    head = gl.team_head(info["project"])
+    head = team_head(gl, info["project"])
     if head and st.get("team_base") != head:  # the team file changes only when the default branch moves
-        st["team"], st["team_base"] = repo_settings(gl.repo_file(info["project"], TEAM_FILE, head)), head
+        try:
+            st["team"], st["team_base"] = repo_settings(gl.repo_file(info["project"], TEAM_FILE, head)), head
+        except (GitLabError, OSError) as e:
+            _warn_once(f"team settings not read for {info['project']}: {type(e).__name__}")
     tcfg = apply_team(cfg, st.get("team") or {})
     data = {"now": now.isoformat(), "me": ctx["me"], "notes": notes, "local": st,
             "autopublish_after_min": cfg["autopublish_after_min"], "quiet_hours": cfg.get("quiet_hours"),
@@ -2952,8 +2965,13 @@ def run_job(job, gl=None, cfg=None):
             _fetch(fetch_args(iid, mr["target_branch"]), repo)
             if not pin_head(repo, iid, refs["head_sha"]):  # GitLab hasn't recomputed diff_refs yet: the retry will
                 raise RuntimeError("MR head moved during review and diff_refs are not updated yet")
-        head = gl.team_head(project)  # the default branch, not the MR's target or head
-        cfg = apply_team(cfg, repo_settings(gl.repo_file(project, TEAM_FILE, head)) if head else {})
+        head = team_head(gl, project)  # the default branch, not the MR's target or head
+        try:
+            team = repo_settings(gl.repo_file(project, TEAM_FILE, head)) if head else {}
+        except (GitLabError, OSError) as e:
+            _warn_once(f"team settings not read for {project}: {type(e).__name__}")
+            team = {}
+        cfg = apply_team(cfg, team)
         r = review_packet(gl, job, mr, refs, cfg, repo)
         packet, pst, meta, siblings, fam, full = r["packet"], r["pst"], r["meta"], r["siblings"], r["fam"], r["full"]
         if fam:
