@@ -1,5 +1,13 @@
 # wiz-review: implementation status and live test plan
 
+> **Batch 1 (v0.4.0):** away mode, delegate, inbox, workload, the EUR cost line, the built-in Jira client, the `gitlab_via` rest/mcp switch, the manual `tick` skill and the GitHub CI file were removed. Sections below that describe them are historical.
+
+> **Batch 2 (v0.6.0):** linked git worktrees are accepted as checkouts (real clone preferred, else the newest worktree; the precheck ref is per worktree). Deleting a draft no longer creates a lesson: lessons are created only by `lessons add`. Sections below about automatic lessons are historical.
+
+> **Batch 3 (v0.7.0):** CI gate. A review (and the author's fallback) waits for a missing/running pipeline of the head commit (bounded by `ci_wait_max_min`, one `ci-wait` marker per commit, which also counts as a pickup for the author's timer) and is blocked by a failed one (one `ci-red` marker per commit, overridden by `/wiz-review rerun` written after it). Switch: `require_green_ci`. Minor findings already went to the summary only; unchanged.
+
+> **Batch 5 (v0.8.0):** opt-in Slack ping (`slack_webhook`: drafts ready, 10-minute autopublish reminder; no code or finding text), opt-in review lenses (`lenses`: security, tests, errors; one extra Claude pass each, merged and deduplicated, one shared cost limit), and `stats` shows a model comparison hint (only with 20+ drafts per model) and the kept-rate by familiarity level.
+
 Spec: `docs/superpowers/specs/2026-11-13-wiz-review-design.md` (v0.2).
 The first step-by-step plan (v0.1) is done. This document replaces it, because the architecture was rewritten.
 

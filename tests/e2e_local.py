@@ -79,8 +79,9 @@ class Machine:
         self.name, self.clone = name, clone
         self.home = tmp / f"home-{name}"
         self.home.mkdir()
-        (self.home / "config.json").write_text(json.dumps({"notify": False, "roots": [], "max_budget_usd": 0.5,
-                                                           "quiet_hours": None}))  # model: plugin default; protocol test, any hour
+        (self.home / "config.json").write_text(json.dumps({"notify": False, "roots": [],
+                                                           "quiet_hours": None,
+                                                           "require_green_ci": False}))  # fake has no pipelines; model: plugin default; any hour
         (self.home / "repos.json").write_text(json.dumps({PROJECT: str(clone)}))
         self.env = {**os.environ, "WIZ_REVIEW_HOME": str(self.home), "GITLAB_PERSONAL_ACCESS_TOKEN": token,
                     "WIZ_REVIEW_GITLAB_HOST": gl.host, "WIZ_REVIEW_GITLAB_SCHEME": "http", "WIZ_REVIEW_FAST": "1"}
@@ -159,9 +160,9 @@ def main():
     m = pavlo.metrics()
     check("metrics recorded with cost", len(m) == 1 and not m[0].get("error") and m[0].get("cost_usd") is not None, str(m))
     check("the plugin default model (haiku) was used", m and "haiku" in (m[0].get("model") or ""), str(m))
-    pre = "🤖 _wiz-review · Claude Code · " + (m[0].get("model") if m else "?") + " · "
-    check("every draft names tool, model, tokens and USD/EUR cost",
-          drafts and all(d["note"].rstrip().split("\n")[-1].startswith(pre) and "tokens · $" in d["note"] and "≈ €" in d["note"] for d in drafts),
+    tag = "🤖 _wiz-review · Claude Code · " + (m[0].get("model") if m else "?") + "_"
+    check("every draft ends with the tool and model tag",
+          drafts and all(d["note"].rstrip().split("\n")[-1] == tag for d in drafts),
           str([d["note"][-120:] for d in drafts]))
     check("metrics carry tokens and cost", m and m[0].get("tokens_in") and m[0].get("tokens_out") and m[0].get("cost_usd") is not None, str(m))
     check("drafts-ready note names tool and model", any("Claude Code" in b and m[0].get("model", "?") in b
@@ -213,11 +214,11 @@ def main():
     ok = wait_for(lambda: any(b.startswith("🤖 **Авто-рев'ю") for b in bodies(gl, key2)), timeout=180)
     check("fallback review posted as a plain note", ok, str(bodies(gl, key2)))
     fb = next((b for b in bodies(gl, key2) if b.startswith("🤖 **Авто-рев'ю")), "")
-    check("fallback note names tool, model, tokens and cost", "🤖 _wiz-review · Claude Code · claude-" in fb.rstrip()[-140:]
-          and "tokens · $" in fb.rstrip()[-140:], fb[-160:])
+    check("fallback note names tool and model (no cost in MR text)", "🤖 _wiz-review · Claude Code · claude-" in fb.rstrip()[-140:]
+          and "tokens" not in fb.rstrip()[-140:], fb[-160:])
     rc, o = olena.wr("stats")
     print("   author machine stats:\n   " + o.replace("\n", "\n   "))
-    check("stats shows tokens and both currencies", rc == 0 and "tokens:" in o and "$" in o and "€" in o, o)
+    check("stats shows tokens and USD cost", rc == 0 and "tokens:" in o and "$" in o and "€" not in o, o)
     print("   fallback:", fb[:200].replace("\n", " "))
 
     # 8. GitLab outage does not crash the tick
