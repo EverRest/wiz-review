@@ -1702,7 +1702,7 @@ def open_mr(gl, args):
 
 MAX_CRITERIA, MAX_CRITERION_CHARS = 10, 300
 MAX_DECISIONS_CHARS = 1500
-def request_note(why, tested, questions, criteria=None, decisions=None):
+def request_note(why, tested, questions, criteria=None, decisions=None, clone_project=None):
     """criteria: acceptance criteria the author approved (free text); they go to every reviewer.
     decisions: the author's approved 'decisions and trade-offs' text (claims for the reviewer to verify)."""
     if not (why or "").strip() or not (tested or "").strip():
@@ -1718,6 +1718,9 @@ def request_note(why, tested, questions, criteria=None, decisions=None):
         raise ValueError("decisions must be a string")
     if (decisions or "").strip():
         text += "\n**Рішення і компроміси:**\n" + decisions.strip()[:MAX_DECISIONS_CHARS]
+    if clone_project:  # the reviewer has no local clone yet: say so before the pickup, not after "no local checkout"
+        text += (f"\n**Перед рев'ю:** у вас немає клону `{clone_project}`. Клонуйте його в папку, яка входить до ваших "
+                 f"`roots` (`repos --root <папка>`). Без клону рев'ю не почнеться.")
     if find_secrets(text):
         raise SecretLeak("the request note contains something that looks like a secret")
     return text
@@ -1726,7 +1729,7 @@ def request_note(why, tested, questions, criteria=None, decisions=None):
 def request_review(gl, args):
     project, iid = _parse_url(args["url"])
     text = request_note(args.get("why"), args.get("tested"), args.get("questions"), args.get("criteria"),
-                        args.get("decisions"))
+                        args.get("decisions"), clone_project=project if args.get("reviewer_needs_clone") else None)
     if args.get("reviewers"):
         gl.set_reviewers(project, iid, args["reviewers"])
     reviewers = [_user(r) for r in gl.mr(project, iid).get("reviewers") or []]

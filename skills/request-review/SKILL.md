@@ -48,6 +48,7 @@ Do not pass free text through shell quoting.
 - Write `~/.wiz-review/tmp/open-mr.json` as `{"project": …, "source": <branch>, "target": <from the repo's CLAUDE.md git workflow; ask if unknown>, "title": …, "description": …}`.
   Target, title, and description matter only if the MR does not exist yet.
   Run `WR open-mr --input <file>`. It returns `{created, iid, url, …}`.
+- Ask the user: "Does each reviewer already have a local clone of this project?" If the user says no, or does not know, add `"reviewer_needs_clone": true`. The note then tells the reviewer to clone it before the review starts.
 - Write `~/.wiz-review/tmp/request.json` as `{"url": <url>, "why": …, "tested": …, "questions": …, "reviewers": ["username", …]}`.
   Add `"criteria": ["…", …]` only if the user approved them.
   Add `"decisions": "<text>"` only if the user approved it.

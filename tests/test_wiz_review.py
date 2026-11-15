@@ -1750,6 +1750,11 @@ class RequestFlowTests(TempHome):
         for part in ("**Навіщо:** cart total (SEQ-1)", "**Як тестували:** ran unit tests", "**Питання автора:** float ok?"):
             self.assertIn(part, t)
         self.assertIn("**Питання автора:** —", wr.request_note("w", "t", ""))
+    def test_request_note_says_when_the_reviewer_needs_a_clone(self):
+        self.assertNotIn("Перед рев'ю", wr.request_note("w", "t", ""))
+        n = wr.request_note("w", "t", "", clone_project="evo-core/m-evo-core-api")
+        self.assertIn("у вас немає клону `evo-core/m-evo-core-api`", n)
+        self.assertIn("repos --root", n)
         with self.assertRaises(ValueError):
             wr.request_note("", "t", "")
         with self.assertRaises(wr.SecretLeak):
