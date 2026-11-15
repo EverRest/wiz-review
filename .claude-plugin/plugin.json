@@ -1,0 +1,17 @@
+{
+  "name": "wiz-review",
+  "version": "0.3.0",
+  "description": "Peer-to-peer GitLab MR review: the author's agent requests review, the reviewer's own Claude reviews in their checkout and leaves draft notes.",
+  "author": {
+    "name": "Wiz-Team"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/EverRest/wiz-review",
+  "homepage": "https://github.com/EverRest/wiz-review",
+  "keywords": [
+    "code-review",
+    "gitlab",
+    "merge-request",
+    "review"
+  ]
+}

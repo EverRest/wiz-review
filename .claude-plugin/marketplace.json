@@ -1,0 +1,14 @@
+{
+  "name": "wiz-review",
+  "owner": {
+    "name": "Wiz-Team"
+  },
+  "plugins": [
+    {
+      "name": "wiz-review",
+      "source": "./",
+      "description": "Peer-to-peer GitLab MR review with Claude Code."
+    }
+  ],
+  "description": "Wiz-Team Claude Code plugins for MR review."
+}
