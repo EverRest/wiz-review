@@ -1,4 +1,4 @@
-"""Plugin metadata checks shared by GitHub and GitLab CI (stdlib only)."""
+"""Plugin metadata checks run by GitLab CI (stdlib only)."""
 import glob
 import json
 import re
