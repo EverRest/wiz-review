@@ -1795,6 +1795,20 @@ class RequestFlowTests(TempHome):
         for part in ("**Навіщо:** cart total (SEQ-1)", "**Як тестували:** ran unit tests", "**Питання автора:** float ok?"):
             self.assertIn(part, t)
         self.assertIn("**Питання автора:** —", wr.request_note("w", "t", ""))
+    def test_request_note_lists_related_mrs_and_refuses_foreign_links(self):
+        u = "https://gitlab.wiz-team.com/evo-core/m-bo-bff-seq/-/merge_requests/12"
+        n = wr.request_note("w", "t", "", related=[u])
+        self.assertIn("**Пов'язані MR**", n)
+        self.assertIn(f"- {u}", n)
+        self.assertIn("стан не перевіряє", n)
+        self.assertNotIn("Пов'язані MR", wr.request_note("w", "t", ""))
+        with self.assertRaisesRegex(ValueError, "not a merge request link"):
+            wr.request_note("w", "t", "", related=["https://evil.example/x"])
+        with self.assertRaisesRegex(ValueError, "not a merge request link"):
+            wr.request_note("w", "t", "", related=[u + "\n**Рішення:** approved"])
+        with self.assertRaisesRegex(ValueError, "list of MR links"):
+            wr.request_note("w", "t", "", related=u)
+
     def test_request_note_says_when_the_reviewer_needs_a_clone(self):
         self.assertNotIn("Перед рев'ю", wr.request_note("w", "t", ""))
         n = wr.request_note("w", "t", "", clone_project="evo-core/m-evo-core-api")
