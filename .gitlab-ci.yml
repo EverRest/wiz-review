@@ -1,0 +1,19 @@
+variables:
+  GIT_AUTHOR_NAME: ci
+  GIT_AUTHOR_EMAIL: ci@example.com
+  GIT_COMMITTER_NAME: ci
+  GIT_COMMITTER_EMAIL: ci@example.com
+
+test:
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.9", "3.13"]
+  image: python:${PYTHON_VERSION}
+  script:
+    - python -m compileall -q bin tests
+    - python -m unittest tests/test_wiz_review.py -v
+
+lint:
+  image: python:3.13
+  script:
+    - python tests/lint_plugin.py
