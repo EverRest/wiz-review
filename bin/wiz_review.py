@@ -2838,6 +2838,15 @@ def mr_context(gl, url, cfg=None):
             "head_sha": refs["head_sha"], "diff_refs": refs, "files": files, "packet": r["packet"]}
 
 
+def _publish_agent(findings):
+    """The tag for a published review: the tool is fixed; the model is kept only if it looks like a model name."""
+    raw = findings.get("agent") if isinstance(findings.get("agent"), dict) else {}
+    model = raw.get("model")
+    if not (isinstance(model, str) and len(model) <= 60 and MODEL_RE.match(model)):
+        model = "interactive session"
+    return {"tool": AGENT_TOOL, "model": model}
+
+
 def publish_findings(gl, url, findings, cfg=None):
     """`publish-findings`: the findings you approved become DRAFT notes. No review note, no snapshot, no autopublish:
     you still publish or delete each one in GitLab. The same schema, scrubbing and tag as a background review."""
@@ -2846,7 +2855,9 @@ def publish_findings(gl, url, findings, cfg=None):
     if (not isinstance(findings, dict) or not isinstance(findings.get("summary"), str)
             or not isinstance(findings.get("findings"), list) or not all(_finding_ok(f) for f in findings["findings"])):
         raise ValueError("findings do not match the schema: {summary, findings: [{path, line, severity, confidence, body, suggestion?}]}")
-    texts = [findings["summary"]] + [f["body"] + f.get("suggestion", "") for f in findings["findings"]]
+    agent = _publish_agent(findings)  # never the file's own tag text: only a validated model name reaches GitLab
+    findings = {**findings, "agent": agent}  # plan_notes reads the tag from here too
+    texts = [findings["summary"]] + [f["body"] + f.get("suggestion", "") for f in findings["findings"]] + [agent["model"]]
     if any(find_secrets(t, [getattr(gl, "_token", None)]) for t in texts):
         raise SecretLeak("findings contain something that looks like a secret; nothing was posted")
     repo = _need_checkout(project, cfg)
@@ -2865,7 +2876,7 @@ def publish_findings(gl, url, findings, cfg=None):
             except GitLabError:  # GitLab refused the anchor: keep the finding, lose only the position
                 summary += "\n\n" + _line(item["finding"])
         created.append(gl.create_draft(project, iid, "**wiz-review — підсумок**\n\n" + summary
-                                      + f"\n\n{agent_tag(findings.get('agent'))}"))
+                                      + f"\n\n{agent_tag(agent)}"))
     except Exception:  # all or nothing, like a background round
         for d in created:
             try:
