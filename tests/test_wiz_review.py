@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import re
@@ -852,6 +854,15 @@ class FakeGL:
         return {"diff_refs": REFS, "target_branch": "develop", "title": "T", "web_url": URL, "sha": "abc123",
                 "author": {"username": "olena"}, "reviewers": [{"username": "pavlo"}], "head_pipeline": self.pipeline}
 
+    team_file = None  # the repo's .claude/wiz-review.json text at the MR's base (None = no file)
+
+    def base_sha(self, project, iid):
+        return REFS["base_sha"]
+
+    def repo_file(self, project, path, ref):
+        self.repo_file_refs = getattr(self, "repo_file_refs", []) + [(path, ref)]
+        return self.team_file
+
 
 def raw_mr(author="olena", reviewers=("pavlo",), updated="2026-11-13T09:00:00Z", draft=False):
     return {"iid": 142, "web_url": URL, "author": {"username": author},
@@ -1282,6 +1293,37 @@ class TickTests(TempHome):
         self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
         self.tick(require_green_ci=False)
         self.assertEqual(len(self.spawned), 1)
+
+    def test_skipped_round_is_not_retried_and_a_rerun_still_works(self):  # size skip: no retry loop
+        self.gl.rev = [raw_mr()]
+        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ), note("pavlo", "07:05", picked()),
+                                      note("pavlo", "07:06", f"<!-- wiz-review:skipped sha=abc123 -->\nDiff is large")]
+        self.tick(now="2026-11-13T12:00:00Z")
+        self.assertEqual(self.spawned, [])
+        self.gl.notes_by[self.key].append(note("olena", "08:00", "/wiz-review rerun"))
+        self.gl.rev = [raw_mr(updated="2026-11-13T11:50:00Z")]  # the rerun comment is activity on the MR
+        self.tick(now="2026-11-13T12:05:00Z")
+        self.assertEqual([j["kind"] for j in self.spawned], ["review"])
+
+    def test_author_does_not_fall_back_after_the_reviewer_skipped_the_diff(self):
+        self.gl.auth = [raw_mr(author="pavlo", reviewers=("olena",))]
+        base = [note("pavlo", "07:00", REQ), note("olena", "07:05", picked())]
+        self.gl.notes_by[self.key] = base + [note("olena", "07:30", f"<!-- wiz-review:skipped sha=abc123 -->\nbig")]
+        self.tick(now="2026-11-13T12:00:00Z")
+        self.assertEqual(self.spawned, [])
+        self.gl.notes_by[self.key] = base  # control: the same MR without the skip note does fall back
+        self.gl.auth = [raw_mr(author="pavlo", reviewers=("olena",), updated="2026-11-13T11:30:00Z")]  # new activity
+        self.tick(now="2026-11-13T12:00:00Z")
+        self.assertEqual([j["kind"] for j in self.spawned], ["fallback"])
+
+    def test_the_team_file_is_read_at_the_base_and_can_switch_the_ci_gate(self):
+        self.gl.team_file = '{"require_green_ci": false}'
+        self._pipeline("failed")
+        self.gl.rev = [raw_mr()]
+        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
+        self.tick()  # the machine says the gate is on; the repo's team file at the base turns it off for this MR
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(self.gl.repo_file_refs, [(wr.TEAM_FILE, REFS["base_sha"])])
 
     def test_retry_is_not_gated(self):
         self._pipeline("failed")
@@ -3790,6 +3832,130 @@ class ReviewWithMyOwnSessionTests(TempHome):  # review-with-me: gather the packe
         (self.home / "repos.json").write_text("{}")
         with self.assertRaisesRegex(ValueError, "no local checkout"):
             wr.publish_findings(self.gl(), URL, self.approved())
+
+
+class TeamSettingsTests(TempHome):
+    """.claude/wiz-review.json: which keys the repo may set, precedence, language, team rules, size skip."""
+
+    def test_allowed_keys_are_read_and_typed(self):
+        t = wr.repo_settings('{"model": "sonnet", "max_inline": 5, "comment_language": "en", '
+                             '"skip_if_diff_lines_over": 400, "rules_always": ["x"], "lenses": ["security"], '
+                             '"require_green_ci": false, "exclude": ["*.snap"]}')
+        self.assertEqual(t, {"model": "sonnet", "max_inline": 5, "comment_language": "en", "skip_if_diff_lines_over": 400,
+                             "rules_always": ["x"], "lenses": ["security"], "require_green_ci": False, "exclude": ["*.snap"]})
+
+    def test_forbidden_keys_are_never_read_from_the_repo(self):
+        text = ('{"slack_webhook": "https://hooks.slack.com/services/T/B/x", "roots": ["/tmp"], "use_memory": true, '
+                '"autopublish_after_min": 0, "quiet_hours": null, "notify": false, "context_repos": {"a": ["b"]}, '
+                '"gitlab_host": "evil.example", "command": "rm -rf ~"}')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(wr.repo_settings(text), {})
+            wr.repo_settings(text)  # the second read adds no new warnings
+        self.assertEqual(err.getvalue().count("is not a team setting"), 9)
+
+    def test_invalid_values_are_ignored_not_fatal(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            t = wr.repo_settings('{"model": "bad model!", "max_inline": -1, "comment_language": "fr", '
+                                 '"require_green_ci": "maybe", "lenses": ["nope"], "rules_always": "not a list"}')
+        self.assertEqual(t, {})
+
+    def test_bad_json_and_oversized_files_are_ignored(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(wr.repo_settings("{nope"), {})
+            self.assertEqual(wr.repo_settings("{" + "x" * 70000), {})
+            self.assertEqual(wr.repo_settings(None), {})
+
+    def test_precedence_is_defaults_then_machine_then_repo(self):
+        machine = {**wr.DEFAULTS, "model": "haiku", "roots": ["~/code"], "use_memory": True}
+        cfg = wr.apply_team(machine, wr.repo_settings('{"model": "sonnet", "use_memory": false, "roots": ["/x"]}'))
+        self.assertEqual(cfg["model"], "sonnet")  # repo wins for an allowed key
+        self.assertEqual(cfg["roots"], ["~/code"])  # forbidden keys keep the machine's value
+        self.assertTrue(cfg["use_memory"])
+
+    def test_language_default_is_uk_and_en_changes_the_fixed_texts(self):
+        self.assertIs(wr.msg_for({}), wr.MSG["uk"])
+        self.assertEqual(wr.msg_for({"comment_language": "en"})["pickup"], "review started")
+        self.assertEqual(wr.parse_config_value("comment_language", "EN"), "en")
+        with self.assertRaises(SystemExit):
+            wr.parse_config_value("comment_language", "fr")
+        gl = FakeGL()
+        wr._pickup(gl, {"project": "group/m-seq", "iid": 142, "sha": "abc123"}, "pavlo", cfg={"comment_language": "en"})
+        self.assertIn("review started", gl.posted[-1])
+
+    def test_packet_states_the_language_and_default_stays_ukrainian(self):
+        meta = {"url": URL, "title": "t", "target": "develop"}
+        self.assertIn("in English.", wr.build_packet(meta, "", DIFF, {**wr.DEFAULTS, "comment_language": "en"})[0])
+        self.assertIn("in Ukrainian.", wr.build_packet(meta, "", DIFF, dict(wr.DEFAULTS))[0])
+
+    def test_team_rules_are_capped_and_wrapped_as_untrusted(self):
+        cfg = {**wr.DEFAULTS, "rules_always": [f"always {i}" for i in range(30)], "rules_never": ["n" * 500]}
+        lines = wr.team_rule_lines(cfg)
+        self.assertLessEqual(len(lines), wr.RULE_ITEMS)
+        self.assertLessEqual(sum(len(x) for x in lines), wr.RULE_CHARS)
+        pkt = wr.build_packet({"url": URL, "title": "t", "target": "develop"}, "", DIFF, cfg)[0]
+        self.assertIn("## Team rules for this repo", pkt)
+        self.assertIn("<<<UNTRUSTED", pkt[pkt.index("## Team rules"):])
+        self.assertNotIn("Team rules", wr.build_packet({"url": URL, "title": "t", "target": "develop"}, "", DIFF,
+                                                       dict(wr.DEFAULTS))[0])
+
+    def test_skip_note_is_posted_once_per_commit(self):
+        gl = FakeGL()
+        wr._post_skip(gl, "group/m-seq", 142, "d" * 40, 300, dict(wr.DEFAULTS))
+        wr._post_skip(gl, "group/m-seq", 142, "d" * 40, 300, dict(wr.DEFAULTS))
+        self.assertEqual(len(gl.posted), 1)
+        self.assertIn("<!-- wiz-review:skipped sha=" + "d" * 40 + " -->", gl.posted[0])
+        self.assertIn("Diff більший за 300 рядків", gl.posted[0])
+        gl2 = FakeGL()
+        wr._post_skip(gl2, "group/m-seq", 142, "d" * 40, 300, {**wr.DEFAULTS, "comment_language": "en"})
+        self.assertIn("Diff is larger than 300 lines: automatic review skipped", gl2.posted[0])
+
+
+class TeamGitLabTests(unittest.TestCase):
+    def test_base_sha_and_repo_file_at_a_ref(self):
+        import base64
+        seen = []
+
+        def http(method, url, headers, body):
+            seen.append(url)
+            if "/files/" in url:
+                if "missing" in url:
+                    return 404, {}, b'{"message": "404 File Not Found"}'
+                return 200, {}, json.dumps({"encoding": "base64",
+                                            "content": base64.b64encode(b'{"model": "sonnet"}').decode()}).encode()
+            return 200, {}, b'{"diff_refs": {"base_sha": "%s"}}' % (b"b" * 40)
+        gl = wr.GitLab("tok", http=http)
+        self.assertEqual(gl.base_sha("group/m-seq", 142), "b" * 40)
+        self.assertEqual(gl.repo_file("group/m-seq", ".claude/wiz-review.json", "b" * 40), '{"model": "sonnet"}')
+        self.assertIsNone(gl.repo_file("group/m-seq", "missing.json", "b" * 40))
+        self.assertIn("/repository/files/.claude%2Fwiz-review.json?ref=" + "b" * 40, seen[1])
+
+
+class TeamRunJobTests(TempHome):
+    """run_job with git and claude stubbed (the same harness as RunJobLensesTests)."""
+    run_job = RunJobLensesTests.run_job
+    JOB = RunJobLensesTests.JOB
+
+    def test_big_diff_is_not_reviewed_and_gets_one_note(self):
+        rc, calls, rec, gl = self.run_job(skip_if_diff_lines_over=1)
+        self.assertEqual((rc, calls), (0, []))
+        self.assertGreater(rec["skipped"], 1)
+        self.assertEqual(len(gl.posted), 1)
+        self.assertIn("wiz-review:skipped sha=", gl.posted[0])
+
+    def test_diff_under_the_limit_is_reviewed_as_before(self):
+        rc, calls, rec, gl = self.run_job(skip_if_diff_lines_over=10000)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("skipped", rec)
+
+    def test_team_file_at_the_base_sets_the_language_of_the_packet(self):
+        orig = wr._git_show
+        wr._git_show = lambda repo, sha, path: '{"comment_language": "en", "comment_language_bogus": 1}'
+        try:
+            rc, calls, rec, gl = self.run_job()
+        finally:
+            wr._git_show = orig
+        self.assertIn("in English.", calls[0])
 
 
 if __name__ == "__main__":

@@ -209,6 +209,8 @@ The file `~/.wiz-review/config.json` is optional. To change a setting, use `$WR 
 | `slack_webhook` | `null` | A Slack incoming-webhook URL (`https://hooks.slack.com/...`) for a short ping when your drafts are ready and 10 minutes before they autopublish. See "Slack ping". `none` turns it off. |
 | `lenses` | `[]` | Extra focused Claude passes after the main review, for critical repos: any of `security`, `tests`, `errors`. Set with `config set lenses security,tests` (`none` clears). **Each lens adds roughly one more review's cost.** See "Review lenses". |
 | `exclude` | `[]` | Extra file patterns that are not reviewed, for example `["*.generated.md"]`. |
+| `comment_language` | `"uk"` | `uk` or `en`: the language of the plugin's own notes (review started, drafts ready, fallback, failure, summary title) and of the findings the model writes. The packet itself is not translated. Can also be set per repo, see "Team settings in the repo". |
+| `skip_if_diff_lines_over` | `null` | A diff with more changed lines than this gets no automatic review: one note says so, and nothing runs (not even the author's fallback). `none` turns it off. Can also be set per repo. |
 | `context_repos` | `{}` | Sibling projects that a review may read, per project. Example: `{"group/api": ["group/web", "group/worker"]}`. Claude then checks whether a change in `group/api` breaks its consumers. Only clones that exist on your machine are used, read-only. Edit this key in `config.json` by hand; `config set` does not accept it. |
 
 ### Model choice
@@ -226,6 +228,7 @@ $WR doctor                             # shows the current choice in the line "m
 ```
 For one review only: `/wiz-review:review-now <url>` with a model, or `$WR review --url <url> --model opus`.
 The model is chosen in this order: the model given for this review → `model_familiar` (if set, and your familiarity with the changed files is "high") → `model_small` (if set and the change is small) → `model`.
+Settings are layered: built-in defaults, then this machine's `config.json`, then the repo's `.claude/wiz-review.json` for the keys listed in "Team settings in the repo". The repo file wins for those keys.
 If your account cannot use the model, the MR gets a "failed" note with the hint `config set model inherit`.
 Rough cost for a trivial request: `haiku` ≈ $0.001, `sonnet` ≈ $0.01, `opus` ≈ $0.02. For real changes the difference is larger.
 `$WR stats` shows the actual figures for your MRs, split by model. It also shows which model's drafts people keep (see "What `stats` tells you").
@@ -320,6 +323,34 @@ Honest limits:
 - A small sample is noise. Ten MRs say little; repeat with other MRs before drawing a conclusion.
 - The history file can already contain these very comments (for example after `history --backfill`), which flatters `history`. Use MRs newer than your backfill, or compare with `--ablate history` only on MRs you did not backfill.
 - The humans' wording is not scored, only where they commented.
+
+### Team settings in the repo
+
+A repo can carry settings for everyone who reviews it: `.claude/wiz-review.json` at the repo root. Reviews read it from the **MR's base commit** (the target branch as it was when the MR was last updated), never from the MR's own branch. An MR therefore cannot change the rules that judge it; a change to the file takes effect after it is merged.
+
+```json
+{
+  "model": "sonnet",
+  "model_small": "haiku",
+  "small_diff_lines": 80,
+  "max_inline": 15,
+  "exclude": ["*.snap"],
+  "lenses": ["security"],
+  "require_green_ci": true,
+  "ci_wait_max_min": 30,
+  "comment_language": "en",
+  "skip_if_diff_lines_over": 1500,
+  "rules_always": ["Every new cache needs a TTL and an expiry test."],
+  "rules_never": ["Do not flag missing docblocks on private methods."]
+}
+```
+
+- **Keys the repo may set:** `model`, `model_small`, `model_familiar`, `small_diff_lines`, `max_inline`, `exclude`, `lenses`, `require_green_ci`, `ci_wait_max_min`, `comment_language`, `skip_if_diff_lines_over`, `rules_always`, `rules_never`.
+- **Keys the repo can never set:** `slack_webhook`, `roots`, the GitLab host and tokens, `use_memory`, `autopublish_after_min`, `quiet_hours`, `notify`, `context_repos`, and anything that names a path or a command. Those stay per machine. Any other key is ignored, and a warning is printed once per run.
+- **Invalid values are ignored** (with a warning), and the review still runs. A file over 64 KB or invalid JSON is ignored as a whole.
+- **Team rules** (`rules_always`, `rules_never`) go into the packet under "Team rules for this repo", as repo text (not instructions). At most 20 rules and 2000 characters. Your own `never flag` rules from `add_rule` stay separate and per machine.
+- **`doctor`** prints one line: which team keys this checkout's file sets. It shows the working copy; reviews read the base commit.
+- **Where it applies:** background reviews, the author's fallback and `review-now` (they run the same job). `precheck` and `mr-context` ("Reviewing in your own session") do not read the team file yet.
 
 ### Slack ping
 

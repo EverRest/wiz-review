@@ -67,6 +67,8 @@ DEFAULTS = {
     "slack_webhook": None,      # optional Slack incoming webhook: a short ping when drafts are ready / about to autopublish
     "lenses": [],               # extra focused Claude passes after the main review: security, tests, errors (each ~ one more review of cost)
     "exclude": [],              # extra glob patterns of files not worth reviewing
+    "comment_language": "uk",   # uk | en: the plugin's own note texts and the language the model writes findings in
+    "skip_if_diff_lines_over": None,  # diffs larger than this get no automatic review, only a note (None = off)
     "context_repos": {},        # project -> sibling projects whose local clones the review may read (e.g. API consumers)
     # no autopublish (and no reminder) in these hours, machine time; null = off. "tz": an IANA name to override the machine
     "quiet_hours": {"start": "20:00", "end": "08:00", "weekends": True},
@@ -164,7 +166,7 @@ def reviewer_decide(data):
     if pick is None:
         return "review"
 
-    out = _last(ms, me, {"drafts-ready", "done"})
+    out = _last(ms, me, {"drafts-ready", "done", "skipped"})
     round_done = out is not None and out.at > pick.at
     if round_done:
         allowed = {author, *reviewers}
@@ -206,7 +208,7 @@ def author_decide(data):
         return None
 
     def progressing(r):
-        if _last(ms, r, {"drafts-ready", "done"}, after=req.at):
+        if _last(ms, r, {"drafts-ready", "done", "skipped"}, after=req.at):  # skipped: a human must ask for a review
             return True
         gate = _last(ms, r, {"ci-wait", "ci-red"}, after=req.at)  # the reviewer is waiting for CI: that is a pickup
         if gate and (gate.kind == "ci-red"  # red: waits for a human fix or a rerun, the fallback obeys the same gate
@@ -404,6 +406,22 @@ def parse_config_value(key, raw):
         if not valid_model(raw):
             raise SystemExit(f"{key}: not a model name: {raw!r} (aliases like sonnet/opus/haiku or a full id)")
         return raw
+    if key == "comment_language":
+        if raw.lower() not in ("uk", "en"):
+            raise SystemExit("comment_language must be uk or en")
+        return raw.lower()
+    if key == "skip_if_diff_lines_over":
+        if raw.lower() == "default":
+            return _UNSET
+        if raw.lower() == "none":
+            return None
+        try:
+            v = int(raw)
+        except ValueError:
+            raise SystemExit("skip_if_diff_lines_over must be an integer, or none")
+        if v < 1:
+            raise SystemExit("skip_if_diff_lines_over must be at least 1, or none")
+        return v
     if key in INT_MIN:
         try:
             v = int(raw)
@@ -441,6 +459,82 @@ def parse_config_value(key, raw):
             raise SystemExit(f"{key} must be a list of strings")
         return v
     raise SystemExit(f"cannot set {key} from the command line")
+
+
+TEAM_FILE = ".claude/wiz-review.json"  # in the reviewed repo; read from the MR's base commit, never the MR head
+TEAM_KEYS = ("model", "model_small", "model_familiar", "small_diff_lines", "max_inline", "exclude", "lenses",
+             "require_green_ci", "ci_wait_max_min", "comment_language", "skip_if_diff_lines_over",
+             "rules_always", "rules_never")  # everything else (slack_webhook, roots, tokens, use_memory...) stays per machine
+TEAM_MAX_BYTES, RULE_ITEMS, RULE_CHARS, RULE_ITEM_CHARS = 65536, 20, 2000, 200
+_WARNED = set()
+
+
+def _warn_once(msg):
+    if msg not in _WARNED:
+        _WARNED.add(msg)
+        print(f"wiz-review: {msg}", file=sys.stderr)
+
+
+def repo_settings(text):
+    """The team file's settings we accept. Anything not in TEAM_KEYS, or any invalid value, is ignored (logged once).
+    Returns only validated keys: this is the one gate between the repo's text and the machine's config."""
+    if not text:
+        return {}
+    if len(text) > TEAM_MAX_BYTES:
+        _warn_once(f"{TEAM_FILE} is larger than {TEAM_MAX_BYTES} bytes; ignored")
+        return {}
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        _warn_once(f"{TEAM_FILE} is not valid JSON; ignored")
+        return {}
+    if not isinstance(raw, dict):
+        _warn_once(f"{TEAM_FILE} must be a JSON object; ignored")
+        return {}
+    out = {}
+    for k, v in raw.items():
+        if k not in TEAM_KEYS:
+            _warn_once(f"{TEAM_FILE}: {k!r} is not a team setting; ignored")
+            continue
+        if v is None:
+            continue
+        if k in ("rules_always", "rules_never"):
+            if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                out[k] = v
+            else:
+                _warn_once(f"{TEAM_FILE}: {k} must be a list of strings; ignored")
+            continue
+        raw_v = ",".join(v) if k == "lenses" and isinstance(v, list) else (
+            json.dumps(v) if isinstance(v, (list, bool, int)) else str(v))
+        try:
+            out[k] = parse_config_value(k, raw_v)
+        except SystemExit as e:
+            _warn_once(f"{TEAM_FILE}: {k}: {e}; ignored")
+    return out
+
+
+def apply_team(cfg, team):
+    """defaults < machine config.json < the repo's team file (for the keys it may set)."""
+    return {**cfg, **team}
+
+
+def team_rule_lines(cfg):
+    """Team rules as packet lines: capped at RULE_ITEMS items and RULE_CHARS characters in total."""
+    items = [("Flag this when it applies: ", x) for x in cfg.get("rules_always") or []] + \
+            [("Do not report findings of this kind: ", x) for x in cfg.get("rules_never") or []]
+    out, left = [], RULE_CHARS
+    for prefix, text in items[:RULE_ITEMS]:
+        line = "- " + prefix + " ".join(text.split())[:RULE_ITEM_CHARS]
+        if len(line) > left:
+            break
+        out.append(line)
+        left -= len(line)
+    return out
+
+
+def _git_show(repo, sha, path):
+    r = subprocess.run(["git", "show", f"{_check(SHA_RE, sha, 'sha')}:{path}"], cwd=repo, capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
 
 
 def set_config(key, raw):
@@ -1069,6 +1163,7 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, lessons=None, k
         parts = [INSTRUCTIONS.format(subject="one GitLab merge request", whose="reviewer's", tools_rule=rule,
                                      mode=FALLBACK_MODE if kind == "fallback" else ""),
                  f"\n## Merge request\n{meta['url']}\nTarget branch: {meta['target']}"]
+    parts.append(f"## Language\nWrite the body of each finding and the summary in {msg_for(cfg)['lang']}.")
     if since:
         parts.append(f"This is a re-review: only changes after commit {since} are shown. Do not repeat earlier findings.")
     parts.append("## Title\n" + _untrusted(meta.get("title", "")))
@@ -1099,6 +1194,10 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, lessons=None, k
                      + _untrusted("\n".join(f"- {t}" for t in meta["memory"])))
     if meta.get("guides"):
         parts.append("## Area guides written by the people who own this code\n" + _untrusted("\n\n".join(meta["guides"])))
+    rules = team_rule_lines(cfg)
+    if rules:
+        parts.append("## Team rules for this repo (written by the repo owners, from the base branch)\n"
+                     + _untrusted("\n".join(rules)))
     if meta.get("fixes"):
         parts.append("## Past fixes in these files (what broke here before — look for the same mistake again)\n"
                      + _untrusted("\n".join(f"- {t}" for t in meta["fixes"])))
@@ -1508,6 +1607,23 @@ class GitLab:
     def mr(self, project, iid):
         return self._req("GET", self._mrp(project, iid))[0]
 
+    def base_sha(self, project, iid):
+        """The MR's target commit (diff_refs.base_sha): the ref the team settings are read at."""
+        return (self._req("GET", self._mrp(project, iid))[0].get("diff_refs") or {}).get("base_sha")
+
+    def repo_file(self, project, path, ref):
+        """A file at a commit (the MR's base for team settings). None when the file does not exist there."""
+        import base64
+        try:
+            body, _ = self._req("GET", f"/projects/{urllib.parse.quote(project, safe='')}/repository/files/"
+                                       f"{urllib.parse.quote(path, safe='')}", {"ref": ref})
+        except GitLabError as e:
+            if ": 404 " in str(e):
+                return None
+            raise
+        content = body.get("content") or ""
+        return base64.b64decode(content).decode("utf-8", "replace") if body.get("encoding") == "base64" else content
+
     def notes(self, project, iid):
         return self._all(self._mrp(project, iid) + "/notes", {"sort": "asc"})
 
@@ -1898,10 +2014,38 @@ def mr_info(raw):
             "target": raw["target_branch"], "title": raw.get("title", "")}
 
 
-def _pickup(gl, info, me, how="", extra=""):
+MSG = {
+    "uk": {"pickup": "рев'ю почато", "summary": "wiz-review — підсумок",
+           "fallback_title": "🤖 **Авто-рев'ю на машині автора** (ніхто з рев'юерів не взявся)",
+           "fallback_start": "🤖 Ніхто з рев'юерів не взявся — запускаю авто-рев'ю на машині автора.",
+           "failed": "⚠️ @{me}: wiz-review не вдалося (`{msg}`). Буде одна автоматична повторна спроба.",
+           "fallback_failed": "⚠️ Запасне авто-рев'ю не вдалося (`{msg}`). Повторити: ще раз `/wiz-review:request-review` "
+                              "(запустить новий цикл, а за потреби й запасне рев'ю).",
+           "ready": "@{me}: чернетки рев'ю готові ({n}{carry}), зробив {tool} ({model}). Опублікуй або відредагуй у GitLab; {tail}",
+           "carry": " + {k} з попереднього раунду", "model_unknown": "модель невідома",
+           "skipped": "Diff більший за {n} рядків: автоматичне рев'ю пропущено, попросіть ручне рев'ю.",
+           "lang": "Ukrainian"},
+    "en": {"pickup": "review started", "summary": "wiz-review — summary",
+           "fallback_title": "🤖 **Automatic review on the author's machine** (no reviewer picked it up)",
+           "fallback_start": "🤖 No reviewer picked it up — starting the automatic review on the author's machine.",
+           "failed": "⚠️ @{me}: wiz-review failed (`{msg}`). One automatic retry will follow.",
+           "fallback_failed": "⚠️ The fallback review failed (`{msg}`). To retry: run `/wiz-review:request-review` again "
+                              "(starts a new cycle, and the fallback if needed).",
+           "ready": "@{me}: review drafts are ready ({n}{carry}), made by {tool} ({model}). Publish or edit them in GitLab; {tail}",
+           "carry": " + {k} carried from the previous round", "model_unknown": "model unknown",
+           "skipped": "Diff is larger than {n} lines: automatic review skipped, ask for a manual review.",
+           "lang": "English"},
+}
+
+
+def msg_for(cfg):
+    return MSG.get((cfg or {}).get("comment_language"), MSG["uk"])
+
+
+def _pickup(gl, info, me, how="", extra="", cfg=None):
     who = f" ({AGENT_TOOL} · {how})" if how else ""
     gl.post_note(info["project"], info["iid"],
-                 f"<!-- wiz-review:picked-up sha={info['sha']} -->\n🔍 @{me}: рев'ю почато{who}" + (f"\n{extra}" if extra else ""))
+                 f"<!-- wiz-review:picked-up sha={info['sha']} -->\n🔍 @{me}: {msg_for(cfg)['pickup']}{who}" + (f"\n{extra}" if extra else ""))
 
 
 def ci_status(gl, project, iid, sha):
@@ -2004,7 +2148,7 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
         out = _last(ms, me, {"drafts-ready", "done"})
         since = out.sha if action == "rerun" and out else None
         if since and since == info["sha"]:  # rerun asked but nothing new: answer without spending tokens
-            _pickup(gl, info, me)
+            _pickup(gl, info, me, cfg=cfg)
             gl.post_note(project, iid, f"<!-- wiz-review:done sha={since} -->\n✅ @{me}: нових комітів немає — рев'ю актуальне."
                          + (" Неопубліковані чернетки лишаються за рев'юером, автопублікації не буде." if snap else ""))
             drop_snapshot(project, iid)  # `done` closes the round: its drafts are the human's from now on
@@ -2017,7 +2161,7 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
         if ctx["running"] >= cfg["max_concurrent"]:
             st["_deferred"] = True
             return "deferred"
-        _pickup(gl, info, me, models_summary(cfg), extra)
+        _pickup(gl, info, me, models_summary(cfg), extra, cfg)
         ctx["spawn"]({"kind": "review", "project": project, "iid": iid, "url": info["url"], "repo": repo,
                       "since": since, "sha": info["sha"], "target": info["target"], "title": info["title"]})
         ctx["running"] += 1
@@ -2045,8 +2189,7 @@ def _author_step(gl, cfg, ctx, info, notes, st, data):
     if ctx["running"] >= cfg["max_concurrent"]:
         st["_deferred"] = True
         return "deferred"
-    gl.post_note(project, iid, f"<!-- wiz-review:fallback sha={info['sha']} -->\n"
-                 "🤖 Ніхто з рев'юерів не взявся — запускаю авто-рев'ю на машині автора.")
+    gl.post_note(project, iid, f"<!-- wiz-review:fallback sha={info['sha']} -->\n" + msg_for(cfg)["fallback_start"])
     ctx["spawn"]({"kind": "fallback", "project": project, "iid": iid, "url": info["url"], "repo": repo,
                   "since": None, "sha": info["sha"], "target": info["target"], "title": info["title"]})
     ctx["running"] += 1
@@ -2080,11 +2223,15 @@ def _tick_one(gl, cfg, ctx, role, step, raw, now):
     if r.get("seen") == info["updated_at"] and not due and not r.get("deferred"):
         return None
     notes = gl.notes(info["project"], info["iid"])
+    base = gl.base_sha(info["project"], info["iid"])
+    if base and st.get("team_base") != base:  # the team file changes only when the base moves
+        st["team"], st["team_base"] = repo_settings(gl.repo_file(info["project"], TEAM_FILE, base)), base
+    tcfg = apply_team(cfg, st.get("team") or {})
     data = {"now": now.isoformat(), "me": ctx["me"], "notes": notes, "local": st,
             "autopublish_after_min": cfg["autopublish_after_min"], "quiet_hours": cfg.get("quiet_hours"),
-            "require_green_ci": cfg["require_green_ci"], "ci_wait_max_min": cfg["ci_wait_max_min"],
+            "require_green_ci": tcfg["require_green_ci"], "ci_wait_max_min": tcfg["ci_wait_max_min"],
             "mr": {"author": info["author"], "reviewers": info["reviewers"], "draft": info["draft"]}}
-    result = step(gl, cfg, ctx, info, notes, st, data)
+    result = step(gl, tcfg, ctx, info, notes, st, data)
     nd = next_due(data)
     due_at = st.pop("_due", None) or (nd.isoformat() if nd else None)
     st[role] = {"seen": info["updated_at"], "due": due_at, "deferred": bool(st.pop("_deferred", False))}
@@ -2122,7 +2269,7 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify, slack=slack
         raise SecretLeak("review output contains something that looks like a secret; nothing was posted")
     if job["kind"] == "fallback":
         fs = sorted((f for f in findings["findings"] if f["confidence"] != "low"), key=lambda f: SEV_ORDER[f["severity"]])
-        body = "🤖 **Авто-рев'ю на машині автора** (ніхто з рев'юерів не взявся)\n\n" + findings["summary"].strip()
+        body = msg_for(cfg)["fallback_title"] + "\n\n" + findings["summary"].strip()
         if fs:
             body += "\n\n" + "\n".join(_line(f) for f in fs)
         if findings.get("familiarity"):
@@ -2163,17 +2310,17 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify, slack=slack
         if failed:
             summary += "\n\n" + "\n".join(_line(f) for f in failed)
         fam = "".join(f"\n\n_{findings[k]}_" for k in ("familiarity", "notes_used") if findings.get(k))
-        summary_draft = gl.create_draft(project, iid, "**wiz-review — підсумок**\n\n" + summary + fam
+        summary_draft = gl.create_draft(project, iid, f"**{msg_for(cfg)['summary']}**\n\n" + summary + fam
                                         + f"\n\n{agent_tag(findings.get('agent'))}")
         created.append(summary_draft)
     except Exception:
         rollback()
         raise
     agent = findings.get("agent") or {}
-    body = (f"<!-- wiz-review:drafts-ready sha={refs['head_sha']} -->\n"
-            f"@{me}: чернетки рев'ю готові ({len(created)}{f' + {len(carry)} з попереднього раунду' if carry else ''}), "
-            f"зробив {agent.get('tool') or AGENT_TOOL} ({agent.get('model') or 'модель невідома'}). "
-            f"Опублікуй або відредагуй у GitLab; {tail}")
+    M = msg_for(cfg)
+    body = (f"<!-- wiz-review:drafts-ready sha={refs['head_sha']} -->\n" + M["ready"].format(
+        me=me, n=len(created), carry=M["carry"].format(k=len(carry)) if carry else "",
+        tool=agent.get("tool") or AGENT_TOOL, model=agent.get("model") or M["model_unknown"], tail=tail))
     try:
         gl.post_note(project, iid, body)
     except Exception:  # lost response: GitLab may have stored it, and then the protocol already sees this round
@@ -2202,16 +2349,15 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify, slack=slack
     return len(created)
 
 
-def post_failure(gl, job, err):
+def post_failure(gl, job, err, cfg=None):
     """Tell the protocol (and the human) right away, so the retry doesn't wait 30 min."""
-    me = gl.username()
+    me, M = gl.username(), msg_for(cfg)
     msg = scrub(err, [getattr(gl, "_token", None)])[:300]
     if job["kind"] == "review":
         gl.post_note(job["project"], job["iid"], f"<!-- wiz-review:failed sha={job['sha']} -->\n"
-                     f"⚠️ @{me}: wiz-review не вдалося (`{msg}`). Буде одна автоматична повторна спроба.")
+                     + M["failed"].format(me=me, msg=msg))
     else:  # fallback is one-shot: without this the author never learns it failed
-        gl.post_note(job["project"], job["iid"], f"⚠️ Запасне авто-рев'ю не вдалося (`{msg}`). "
-                     "Повторити: ще раз `/wiz-review:request-review` (запустить новий цикл, а за потреби й запасне рев'ю).")
+        gl.post_note(job["project"], job["iid"], M["fallback_failed"].format(msg=msg))
 
 
 def manual_review(gl, url, spawn=None, model=None):
@@ -2745,6 +2891,14 @@ def review_packet(gl, job, mr, refs, cfg, repo):
     return {"packet": packet, "pst": pst, "meta": meta, "siblings": siblings, "fam": fam, "full": full}
 
 
+def _post_skip(gl, project, iid, sha, limit, cfg):
+    """One note per commit, whoever runs it: the tick sees the marker and neither reviews nor falls back for it."""
+    me = gl.username()
+    if any(m.kind == "skipped" and m.sha == sha and m.author == me for m in parse_markers(gl.notes(project, iid))):
+        return
+    gl.post_note(project, iid, f"<!-- wiz-review:skipped sha={sha} -->\n" + msg_for(cfg)["skipped"].format(n=limit))
+
+
 def run_job(job, gl=None, cfg=None):
     cfg, gl = cfg or load_config(), gl or gitlab_from_env()
     project, iid, repo = job["project"], int(job["iid"]), job["repo"]
@@ -2762,12 +2916,17 @@ def run_job(job, gl=None, cfg=None):
             _fetch(fetch_args(iid, mr["target_branch"]), repo)
             if not pin_head(repo, iid, refs["head_sha"]):  # GitLab hasn't recomputed diff_refs yet: the retry will
                 raise RuntimeError("MR head moved during review and diff_refs are not updated yet")
+        cfg = apply_team(cfg, repo_settings(_git_show(repo, refs["base_sha"], TEAM_FILE)))  # the MR's base, not its head
         r = review_packet(gl, job, mr, refs, cfg, repo)
         packet, pst, meta, siblings, fam, full = r["packet"], r["pst"], r["meta"], r["siblings"], r["fam"], r["full"]
         if fam:
             rec["familiarity"] = fam["level"]  # stats split the kept-rate by it (going forward)
         rec.update(diff_lines=pst["changed_lines"], truncated=pst["truncated"])
-        if pst["changed_lines"] == 0:
+        limit, findings = cfg.get("skip_if_diff_lines_over"), None
+        if limit and pst["changed_lines"] > limit:  # too big for an automatic review: say so once, run nothing
+            rec["skipped"] = pst["changed_lines"]
+            _post_skip(gl, project, iid, refs["head_sha"], limit, cfg)
+        elif pst["changed_lines"] == 0:
             findings = {"summary": "Немає змін для рев'ю (лише згенеровані або lock-файли).", "findings": [],
                         "agent": {"tool": AGENT_TOOL, "model": "модель не запускалась"}}
         else:
@@ -2785,14 +2944,15 @@ def run_job(job, gl=None, cfg=None):
             if fam:
                 findings["familiarity"] = familiarity_line(fam, "Reviewer" if job["kind"] == "review" else "Author")
                 findings["familiarity_level"] = fam["level"]
-        rec["findings"] = len(findings["findings"])
-        rec["posted"] = finish_job(gl, job, findings, parse_diff(full), refs, cfg,
-                                   notify if cfg.get("notify", True) else (lambda m, sound=False: None))
+        if findings is not None:
+            rec["findings"] = len(findings["findings"])
+            rec["posted"] = finish_job(gl, job, findings, parse_diff(full), refs, cfg,
+                                       notify if cfg.get("notify", True) else (lambda m, sound=False: None))
     except Exception as e:  # the protocol recovers on its own: retry, then the author's fallback
         rec["error"] = f"{type(e).__name__}: {str(e)[:300]}"
         print(rec["error"], file=sys.stderr)
         try:
-            post_failure(gl, job, rec["error"])
+            post_failure(gl, job, rec["error"], cfg)
         except Exception as e2:
             print(f"could not post failure: {e2}", file=sys.stderr)
     finally:
@@ -2878,7 +3038,7 @@ def publish_findings(gl, url, findings, cfg=None):
                 created.append(gl.create_draft(project, iid, item["note"], item["position"]))
             except GitLabError:  # GitLab refused the anchor: keep the finding, lose only the position
                 summary += "\n\n" + _line(item["finding"])
-        created.append(gl.create_draft(project, iid, "**wiz-review — підсумок**\n\n" + summary
+        created.append(gl.create_draft(project, iid, f"**{msg_for(cfg)['summary']}**\n\n" + summary
                                       + f"\n\n{agent_tag(agent)}"))
     except Exception:  # all or nothing, like a background round
         for d in created:
@@ -2966,6 +3126,16 @@ def launcher_target():
 
 def doctor():
     ok = True
+    try:  # the team file the reviews would read: the working copy here (reviews read it from the MR's base)
+        repo = here().get("repo")
+        tf = Path(repo) / TEAM_FILE if repo else None
+        if tf and tf.is_file():
+            ts = repo_settings(tf.read_text(errors="replace"))
+            print(f"· team settings: {', '.join(sorted(ts)) or 'none valid'} (from {TEAM_FILE} in this checkout)")
+        elif tf:
+            print(f"· team settings: none (no {TEAM_FILE} in this checkout)")
+    except Exception:
+        pass
 
     def line(good, text):
         nonlocal ok
