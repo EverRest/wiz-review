@@ -264,7 +264,7 @@ The summary draft gets one fixed line, not written by the model: `Reviewer famil
 - up to 3 **drafts you rewrote**, as `agent version -> your version` pairs (same files first, then the same folders, newest first). When you edit a draft and publish it, the plugin saves both texts. These pairs show your wording and priorities better than any other signal;
 - your earlier comments on the same files (then on files in the same folders), newest first, cut to 300 characters, and scrubbed for secrets. Comments and rewrites together are at most `history_in_packet`.
 
-Comments are collected locally in `~/.wiz-review/history/<project>.jsonl` (the newest 300): when you publish or edit drafts, the comment as you left it is saved; deleted drafts are not. When untouched drafts are autopublished, they are saved as they were. To start with real history instead of an empty file, read your own diff comments on recent merged MRs once:
+Comments are collected locally in `~/.wiz-review/history/<project>.jsonl` (the newest 300): when you publish or edit drafts, the comment as you left it is saved; deleted drafts are not. Untouched drafts that are autopublished are **not** saved: they are the agent's own words, and replaying them as your history would let one bad review teach the next. To start with real history instead of an empty file, read your own diff comments on recent merged MRs once:
 ```bash
 $WR history --backfill --limit 30      # run inside the repo, or add --project group/repo
 ```
@@ -284,7 +284,7 @@ The review runs in `--restricted` mode, so the model reads nothing of yours exce
 |---|---|---|
 | `CLAUDE.md` and the repo's docs | the reviewer's checkout | always |
 | `.claude/review.md` | the repo | always, if the file exists |
-| **Area guides** `.claude/review/*.md` | the repo, read from the **MR head** (so a guide matches the code under review) | always, for the files that match. Up to 4 guides and 8000 characters |
+| **Area guides** `.claude/review/*.md` | the repo, read from the **MR's base commit**, so an MR cannot rewrite the guides that judge it (a guide the MR adds or changes takes effect after merge) | always, for the files that match. Up to 4 guides and 8000 characters |
 | **Past fixes** | `git log` of the base, for the changed files: up to 10 commits whose message mentions fix, bug, hotfix, revert or regression | always, every kind of review; `fix_history false` turns it off |
 | **Author's decisions** | the "Рішення і компроміси" section of the request note | when the author wrote one; the model treats it as claims to verify |
 | **Reviewer memory digest** | your own `~/.claude/projects/<project>/memory` | only with `use_memory true`, in your reviews and in `precheck`; never in a fallback |

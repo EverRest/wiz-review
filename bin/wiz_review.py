@@ -1965,9 +1965,6 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
                     if not snap.get("publishing"):  # first attempt only: a resumed one must not count the round twice
                         snap["publishing"] = True
                         snap["critical_out"] = any(v.get("critical") for v in snap["ids"].values())
-                        add_history(project, [{"path": v["path"], "line": v["line"], "body": v["body"],
-                                               "at": ctx["now"].isoformat(), **({"critical": True} if v.get("critical") else {})}
-                                              for v in snap["ids"].values() if not v.get("summary") and v.get("path")])
                         log_round(project, "auto", snap.get("model"), deleted=0, familiarity=snap.get("familiarity"),
                                   drafts=sum(1 for v in snap["ids"].values() if not v.get("summary")))
                         write_snapshot(project, iid, snap)
@@ -2662,7 +2659,7 @@ GUIDE_DIR, GUIDE_MAX, GUIDE_CHARS = ".claude/review", 4, 8000
 def area_guides(repo, ref, files):
     """`.claude/review/*.md` of the reviewed repo: written by the people who own the code. An optional first line
     `paths: glob, glob` limits a guide to changes under those paths (fnmatch on the changed file names); no `paths:`
-    line = always. `ref`: the MR head (so the guide matches the code under review); None = the working tree (precheck).
+    line = always. `ref`: the MR's base commit (an MR must not edit the guides that judge it); None = the working tree (precheck).
     -> ["### name\ntext"], at most GUIDE_MAX guides and GUIDE_CHARS characters."""
     if ref:
         names = sorted(n for n in _git_out(["git", "ls-tree", "--name-only", ref, "--", GUIDE_DIR + "/"], repo).splitlines()
@@ -2731,9 +2728,9 @@ def run_job(job, gl=None, cfg=None):
             fam = None
         if fam:
             rec["familiarity"] = fam["level"]  # stats split the kept-rate by it (going forward)
-        try:  # repo-owned guides: for every kind of review, read from the MR head
+        try:  # repo-owned guides: read from the MR's BASE, so the MR itself cannot rewrite the guides that judge it
             guides = [] if "guides" in cfg.get("_ablate", ()) else area_guides(
-                repo, f"refs/wiz-review/{iid}", [f[0] for f in diff_files(full, cfg["exclude"])])
+                repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
         except Exception as e:
             guides = []
             print(f"area guides left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
