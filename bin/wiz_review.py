@@ -461,10 +461,11 @@ def parse_config_value(key, raw):
     raise SystemExit(f"cannot set {key} from the command line")
 
 
-TEAM_FILE = ".claude/wiz-review.json"  # in the reviewed repo; read from the MR's base commit, never the MR head
+TEAM_FILE = ".claude/wiz-review.json"  # in the reviewed repo; read from the default branch head, never the MR or its target
 TEAM_KEYS = ("model", "model_small", "model_familiar", "small_diff_lines", "max_inline", "exclude", "lenses",
-             "require_green_ci", "ci_wait_max_min", "comment_language", "skip_if_diff_lines_over",
-             "rules_always", "rules_never")  # everything else (slack_webhook, roots, tokens, use_memory...) stays per machine
+             "require_green_ci", "ci_wait_max_min", "comment_language", "skip_if_diff_lines_over", "rules_always")
+# everything else (slack_webhook, roots, tokens, use_memory, rules_never...) stays per machine.
+# rules_never is not here: a repo file must not be able to hide findings. The keys below can only make the machine stricter.
 TEAM_MAX_BYTES, RULE_ITEMS, RULE_CHARS, RULE_ITEM_CHARS = 65536, 20, 2000, 200
 _WARNED = set()
 
@@ -514,8 +515,21 @@ def repo_settings(text):
 
 
 def apply_team(cfg, team):
-    """defaults < machine config.json < the repo's team file (for the keys it may set)."""
-    return {**cfg, **team}
+    """defaults < machine config.json < the repo's team file. The repo can add to the machine's rules, never remove them:
+    exclude and lenses are unions, require_green_ci only turns on, skip_if_diff_lines_over only lowers."""
+    out = {**cfg, **{k: v for k, v in team.items() if k in ("model", "model_small", "model_familiar", "small_diff_lines",
+                                                            "max_inline", "ci_wait_max_min", "comment_language",
+                                                            "rules_always")}}
+    if "exclude" in team:
+        out["exclude"] = sorted(set(cfg.get("exclude") or []) | set(team["exclude"]))
+    if "lenses" in team:
+        out["lenses"] = sorted(set(cfg.get("lenses") or []) | set(team["lenses"]))
+    if "require_green_ci" in team:
+        out["require_green_ci"] = bool(cfg.get("require_green_ci")) or bool(team["require_green_ci"])
+    if "skip_if_diff_lines_over" in team:
+        limits = [x for x in (cfg.get("skip_if_diff_lines_over"), team["skip_if_diff_lines_over"]) if x]
+        out["skip_if_diff_lines_over"] = min(limits) if limits else None
+    return out
 
 
 def team_rule_lines(cfg):
@@ -1608,8 +1622,17 @@ class GitLab:
         return self._req("GET", self._mrp(project, iid))[0]
 
     def base_sha(self, project, iid):
-        """The MR's target commit (diff_refs.base_sha): the ref the team settings are read at."""
+        """The MR's target commit (diff_refs.base_sha)."""
         return (self._req("GET", self._mrp(project, iid))[0].get("diff_refs") or {}).get("base_sha")
+
+    def team_head(self, project):
+        """The commit the team settings are read at: the head of the project's default branch. An MR cannot pick it."""
+        p = urllib.parse.quote(project, safe="")
+        db = self._req("GET", f"/projects/{p}")[0].get("default_branch")
+        if not db:
+            return None
+        commit = self._req("GET", f"/projects/{p}/repository/branches/{urllib.parse.quote(db, safe='')}")[0].get("commit") or {}
+        return commit.get("id")
 
     def repo_file(self, project, path, ref):
         """A file at a commit (the MR's base for team settings). None when the file does not exist there."""
@@ -2223,9 +2246,9 @@ def _tick_one(gl, cfg, ctx, role, step, raw, now):
     if r.get("seen") == info["updated_at"] and not due and not r.get("deferred"):
         return None
     notes = gl.notes(info["project"], info["iid"])
-    base = gl.base_sha(info["project"], info["iid"])
-    if base and st.get("team_base") != base:  # the team file changes only when the base moves
-        st["team"], st["team_base"] = repo_settings(gl.repo_file(info["project"], TEAM_FILE, base)), base
+    head = gl.team_head(info["project"])
+    if head and st.get("team_base") != head:  # the team file changes only when the default branch moves
+        st["team"], st["team_base"] = repo_settings(gl.repo_file(info["project"], TEAM_FILE, head)), head
     tcfg = apply_team(cfg, st.get("team") or {})
     data = {"now": now.isoformat(), "me": ctx["me"], "notes": notes, "local": st,
             "autopublish_after_min": cfg["autopublish_after_min"], "quiet_hours": cfg.get("quiet_hours"),
@@ -2916,7 +2939,8 @@ def run_job(job, gl=None, cfg=None):
             _fetch(fetch_args(iid, mr["target_branch"]), repo)
             if not pin_head(repo, iid, refs["head_sha"]):  # GitLab hasn't recomputed diff_refs yet: the retry will
                 raise RuntimeError("MR head moved during review and diff_refs are not updated yet")
-        cfg = apply_team(cfg, repo_settings(_git_show(repo, refs["base_sha"], TEAM_FILE)))  # the MR's base, not its head
+        head = gl.team_head(project)  # the default branch, not the MR's target or head
+        cfg = apply_team(cfg, repo_settings(gl.repo_file(project, TEAM_FILE, head)) if head else {})
         r = review_packet(gl, job, mr, refs, cfg, repo)
         packet, pst, meta, siblings, fam, full = r["packet"], r["pst"], r["meta"], r["siblings"], r["fam"], r["full"]
         if fam:

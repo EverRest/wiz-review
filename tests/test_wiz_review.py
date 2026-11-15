@@ -859,6 +859,9 @@ class FakeGL:
     def base_sha(self, project, iid):
         return REFS["base_sha"]
 
+    def team_head(self, project):
+        return "d" * 40  # the default branch head
+
     def repo_file(self, project, path, ref):
         self.repo_file_refs = getattr(self, "repo_file_refs", []) + [(path, ref)]
         return self.team_file
@@ -1316,14 +1319,14 @@ class TickTests(TempHome):
         self.tick(now="2026-11-13T12:00:00Z")
         self.assertEqual([j["kind"] for j in self.spawned], ["fallback"])
 
-    def test_the_team_file_is_read_at_the_base_and_can_switch_the_ci_gate(self):
+    def test_the_team_file_on_the_default_branch_cannot_switch_the_ci_gate_off(self):
         self.gl.team_file = '{"require_green_ci": false}'
         self._pipeline("failed")
         self.gl.rev = [raw_mr()]
         self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick()  # the machine says the gate is on; the repo's team file at the base turns it off for this MR
-        self.assertEqual(len(self.spawned), 1)
-        self.assertEqual(self.gl.repo_file_refs, [(wr.TEAM_FILE, REFS["base_sha"])])
+        self.tick()  # the machine says the gate is on; a repo file can only make it stricter, so no review on red CI
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(self.gl.repo_file_refs, [(wr.TEAM_FILE, "d" * 40)])  # the default branch, not the MR
 
     def test_retry_is_not_gated(self):
         self._pipeline("failed")
@@ -3888,6 +3891,19 @@ class TeamSettingsTests(TempHome):
         self.assertIn("in English.", wr.build_packet(meta, "", DIFF, {**wr.DEFAULTS, "comment_language": "en"})[0])
         self.assertIn("in Ukrainian.", wr.build_packet(meta, "", DIFF, dict(wr.DEFAULTS))[0])
 
+    def test_the_repo_file_can_only_tighten_the_machine_rules(self):
+        machine = {**wr.DEFAULTS, "exclude": ["*.lock"], "lenses": ["security"], "require_green_ci": True,
+                   "skip_if_diff_lines_over": 500}
+        out = wr.apply_team(machine, {"exclude": ["*.snap"], "lenses": ["tests"], "require_green_ci": False,
+                                      "skip_if_diff_lines_over": 900})
+        self.assertEqual(out["exclude"], ["*.lock", "*.snap"])  # added, not removed
+        self.assertEqual(out["lenses"], ["security", "tests"])  # added, not removed
+        self.assertTrue(out["require_green_ci"])  # cannot be switched off by the repo
+        self.assertEqual(out["skip_if_diff_lines_over"], 500)  # the smaller limit wins
+        out = wr.apply_team(machine, {"skip_if_diff_lines_over": 200, "require_green_ci": True})
+        self.assertEqual(out["skip_if_diff_lines_over"], 200)
+        self.assertNotIn("rules_never", wr.repo_settings('{"rules_never": ["nothing"]}'))  # cannot hide findings
+
     def test_team_rules_are_capped_and_wrapped_as_untrusted(self):
         cfg = {**wr.DEFAULTS, "rules_always": [f"always {i}" for i in range(30)], "rules_never": ["n" * 500]}
         lines = wr.team_rule_lines(cfg)
@@ -3948,13 +3964,13 @@ class TeamRunJobTests(TempHome):
         self.assertEqual(len(calls), 1)
         self.assertNotIn("skipped", rec)
 
-    def test_team_file_at_the_base_sets_the_language_of_the_packet(self):
-        orig = wr._git_show
-        wr._git_show = lambda repo, sha, path: '{"comment_language": "en", "comment_language_bogus": 1}'
+    def test_team_file_on_the_default_branch_sets_the_language_of_the_packet(self):
+        orig = FakeGL.repo_file
+        FakeGL.repo_file = lambda self, project, path, ref: '{"comment_language": "en", "comment_language_bogus": 1}'
         try:
             rc, calls, rec, gl = self.run_job()
         finally:
-            wr._git_show = orig
+            FakeGL.repo_file = orig
         self.assertIn("in English.", calls[0])
 
 
