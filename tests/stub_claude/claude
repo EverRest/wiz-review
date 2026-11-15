@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Test stub for `claude -p`: same JSON shape, canned finding on the first changed line of the packet. No model call."""
+import json, re, sys
+packet = sys.stdin.read()
+path, line = "app/Foo.php", 1
+cur, new_no, found = None, None, False
+for raw in packet.splitlines():  # first ADDED line of the first file: the only place GitLab accepts an inline note
+    if raw.startswith("+++ b/"):
+        cur, new_no = raw[6:].strip(), None
+        continue
+    h = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)", raw)
+    if h:
+        new_no = int(h.group(1))
+        continue
+    if cur and new_no is not None and raw.startswith("+") and not raw.startswith("+++"):
+        path, line, found = cur, new_no, True
+        break
+    if cur and new_no is not None and not raw.startswith("-"):
+        new_no += 1
+usage = {"claude-haiku-5-5": {"inputTokens": 100, "outputTokens": 20, "cacheReadInputTokens": 0,
+                              "cacheCreationInputTokens": 0, "costUSD": 0.0}}
+out = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "total_cost_usd": 0.0,
+       "modelUsage": usage, "result": "",
+       "structured_output": {"summary": "Stub review: canned finding for the e2e run.",
+                             "findings": [{"path": path, "line": line, "severity": "important", "confidence": "high",
+                                           "body": "Stub finding: check this line (e2e stub, no model)."}]}}
+print(json.dumps(out))

@@ -132,6 +132,12 @@ class FakeGitLab:
                 mrs = [m for m in mrs if m["author"] == q["author_username"]]
             page, hdr = self._page([self.mr_json(m) for m in mrs], q)
             return 200, page, hdr
+        if method == "GET" and re.match(r"^/projects/[^/]+$", p):  # project: its default branch
+            return 200, {"default_branch": "main"}, {}
+        if method == "GET" and re.match(r"^/projects/[^/]+/repository/branches/", p):
+            return 200, {"commit": {"id": "d" * 40}}, {}
+        if method == "GET" and re.match(r"^/projects/[^/]+/repository/files/", p):  # no team file in the fake repo
+            return 404, {"message": "404 File Not Found"}, {}
         m = re.match(r"^/projects/(.+?)/merge_requests(?:/(\d+))?(?:/(.*))?$", p)
         if not m:
             raise KeyError
