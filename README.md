@@ -155,7 +155,7 @@ Running `/request-review` again does the same thing.
 | What you do with the drafts | What happens |
 |---|---|
 | You edit, delete, or publish them | Your version stays. Deleting a draft is counted in `stats`, but it teaches the plugin nothing. To make a rule for the repo, say it yourself: `$WR lessons add` (see §7). |
-| You do not touch them for 30 minutes (`autopublish_after_min`) | The plugin **publishes them itself**, under your name. You get a reminder with sound 10 minutes before. `0` turns autopublish off. The 30 minutes are always working time: nothing is published from 20:00 to 08:00 or at the weekend (`quiet_hours`). Drafts from Friday 19:50 are published on Monday at 08:30. |
+| You do not touch them for 30 minutes (`autopublish_after_min`, off by default: enable it with `config set`) | The plugin **publishes them itself**, under your name. You get a reminder with sound 10 minutes before. `0` turns autopublish off. The 30 minutes are always working time: nothing is published from 20:00 to 08:00 or at the weekend (`quiet_hours`). Drafts from Friday 19:50 are published on Monday at 08:30. |
 | You start editing and stop | **Nothing** is published automatically. |
 | You do not want to review | Remove yourself from the Reviewers list in the MR. |
 
@@ -174,7 +174,7 @@ The reviewer turned off the laptop, is offline, or declined. After **30 minutes*
 The result appears as a normal comment in the MR, not as a draft.
 
 ### Rules to know
-- A review starts only when **CI is not in the way** (`require_green_ci`, on by default). The reviewer's machine looks at the pipeline of the MR's head commit: if it is missing or still running, it waits (one `⏳ ci-wait` note per commit, then re-checks every 2 minutes) for up to `ci_wait_max_min` (30), then reviews anyway and says so in the "review started" note. If it **failed**, no review starts: one `🔴 ci-red` note asks to fix the pipeline and push, or to write `/wiz-review rerun` to review that commit anyway. `success`, `manual`, `skipped` and `canceled` count as "go". The ⏳ note counts as a pickup for the author's 30-minute timer, so the fallback does not start while a reviewer waits for CI. The fallback review obeys the same gate (it waits for a missing or running pipeline, never reviews a red one unless someone writes `rerun`). A project with no CI at all waits the full `ci_wait_max_min` before every review: set `require_green_ci` to `false` there.
+- A review starts only when **CI is not in the way** (`require_green_ci`, **off by default**: set it to `true` to turn the gate on). The reviewer's machine looks at the pipeline of the MR's head commit: if it is missing or still running, it waits (one `⏳ ci-wait` note per commit, then re-checks every 2 minutes) for up to `ci_wait_max_min` (30), then reviews anyway and says so in the "review started" note. If it **failed**, no review starts: one `🔴 ci-red` note asks to fix the pipeline and push, or to write `/wiz-review rerun` to review that commit anyway. `success`, `manual`, `skipped` and `canceled` count as "go". The ⏳ note counts as a pickup for the author's 30-minute timer, so the fallback does not start while a reviewer waits for CI. The fallback review obeys the same gate (it waits for a missing or running pipeline, never reviews a red one unless someone writes `rerun`). A project with no CI at all waits the full `ci_wait_max_min` before every review: set `require_green_ci` to `false` there.
 - An MR in **Draft** status is ignored.
 - If you are the author, you do not run a review of your own MR.
 - A review starts only in an MR where the author left a "request" note (`/request-review`). Assigning a reviewer by hand does not create that note.
@@ -200,9 +200,9 @@ The file `~/.wiz-review/config.json` is optional. To change a setting, use `$WR 
 | `small_diff_lines` | `60` | The limit for a "small" change, in lines. |
 | `max_diff_lines` | `3000` | How many diff lines are sent to Claude. Claude reads the rest on demand. |
 | `max_inline` | `20` | The maximum number of comments on specific lines. The rest go to the summary. Minor findings always go to the summary. |
-| `require_green_ci` | `true` | Review only when the head commit's pipeline is not missing/running (wait) and not failed (blocked until `/wiz-review rerun`). `false` = review regardless of CI. |
+| `require_green_ci` | `false` | `true` = review only when the head commit's pipeline is not missing/running (wait) and not failed (blocked until `/wiz-review rerun`). `false` = review regardless of CI. |
 | `ci_wait_max_min` | `30` | How long to wait for a missing or running pipeline before reviewing anyway. |
-| `autopublish_after_min` | `30` | After how many minutes untouched drafts are published. `0` = never. Then the drafts wait until you publish them yourself. |
+| `autopublish_after_min` | `0` | Off by default: drafts wait until you publish them yourself. Set e.g. `config set autopublish_after_min 30` to publish untouched drafts after that many minutes. `0` = never. |
 | `quiet_hours` | `{"start": "20:00", "end": "08:00", "weekends": true}` | No autopublish and no reminder in these hours, machine time. The reviewer always gets `autopublish_after_min` minutes of working time. Add `"tz": "Europe/Kyiv"` to use another time zone. `null` turns it off. Edit this key in `config.json` by hand. `doctor` shows the current value. |
 | `critical_label` | `"wiz-review::critical"` | A label for the MR when a critical finding is **published**: by you, by autopublish, or by a fallback review. A critical draft that you deleted adds no label. Other labels stay. The plugin never removes the label: people do. `null` turns it off. If GitLab refuses the label, the review still finishes, and the log says why. |
 | `notify` | `true` | Desktop notifications. |

@@ -39,6 +39,8 @@ def data(notes, me="pavlo", author="olena", reviewers=("pavlo", "ivan"), local=N
 
 
 REQ = "<!-- wiz-review:request -->\nНавіщо..."
+# Opt-in features (off by default). Tests of the CI gate and autopublish turn them on explicitly.
+OPT_IN = {"require_green_ci": True, "autopublish_after_min": 30}
 
 
 def rdata(notes, **kw):
@@ -538,7 +540,7 @@ AGENT = {"tool": "Claude Code", "model": "claude-haiku-5-5"}
 
 class AlertTests(TempHome):
     def test_autopublish_config(self):
-        self.assertEqual(wr.DEFAULTS["autopublish_after_min"], 30)
+        self.assertEqual(wr.DEFAULTS["autopublish_after_min"], 0)
         wr.main(["config", "set", "autopublish_after_min", "0"])
         self.assertEqual(wr.load_config()["autopublish_after_min"], 0)
         wr.main(["config", "set", "autopublish_after_min", "45"])
@@ -884,7 +886,7 @@ class TickTests(TempHome):
         self.key = ("group/m-seq", 142)
 
     def tick(self, now=NOW, **cfg):  # roots=[] by default: tests never scan the real ~/code
-        return wr.tick(self.gl, {**wr.DEFAULTS, "roots": [], **cfg}, now=wr.parse_time(now),
+        return wr.tick(self.gl, {**wr.DEFAULTS, **OPT_IN, "roots": [], **cfg}, now=wr.parse_time(now),
                        spawn=self.spawned.append,
                        notify=lambda m, sound=False: (self.notified.append(m), self.sounds.append(sound)))
 
@@ -1653,7 +1655,7 @@ class ModelAndConfigTypesTests(TempHome):
                     wr.parse_config_value("model", bad)
 
     def test_ci_gate_config(self):
-        self.assertTrue(wr.DEFAULTS["require_green_ci"])
+        self.assertFalse(wr.DEFAULTS["require_green_ci"])
         self.assertEqual(wr.DEFAULTS["ci_wait_max_min"], 30)
         self.assertIs(wr.parse_config_value("require_green_ci", "false"), False)
         self.assertEqual(wr.parse_config_value("ci_wait_max_min", "45"), 45)
@@ -2008,6 +2010,7 @@ class CriticalLabelTests(TempHome):  # I: a published critical finding is visibl
         self.assertEqual(g2.labels, [])  # low confidence is dropped, so it does not count
 
     def ready_tick(self, g, drafts, now="2026-11-13T10:00:00Z", extra_notes=(), **cfg):
+        cfg = {**OPT_IN, **cfg}
         clone = tempfile.TemporaryDirectory()
         self.addCleanup(clone.cleanup)
         (self.home / "repos.json").write_text(json.dumps({"group/m-seq": clone.name}))
@@ -2122,7 +2125,7 @@ class QuietHoursTests(TempHome):  # A: nothing is published under my name at nig
         wr.save_snapshot("group/m-seq", 142, gl.draft_list, before_ids=[], summary_id=2)
         gl.notes_by[("group/m-seq", 142)] = [note("olena", "07:00", REQ), note("pavlo", "19:40", picked()),
                                              note("pavlo", "19:50", ready(), nid=7)]
-        cfg = {**wr.DEFAULTS, "roots": [], "quiet_hours": self.Q}
+        cfg = {**wr.DEFAULTS, **OPT_IN, "roots": [], "quiet_hours": self.Q}
 
         def tick(now):
             return wr.tick(gl, cfg, now=wr.parse_time(now), spawn=lambda j: None,
@@ -2139,7 +2142,7 @@ class QuietHoursTests(TempHome):  # A: nothing is published under my name at nig
     def test_ready_note_does_not_promise_a_time_quiet_hours_will_move(self):
         gl = FakeGL()
         wr.finish_job(gl, {"kind": "review", "project": "group/m-seq", "iid": 142, "url": URL, "sha": "abc123"},
-                      {"summary": "s", "findings": []}, {}, REFS, {**wr.DEFAULTS, "quiet_hours": self.Q},
+                      {"summary": "s", "findings": []}, {}, REFS, {**wr.DEFAULTS, **OPT_IN, "quiet_hours": self.Q},
                       notify=lambda m, sound=False: None)
         self.assertIn("30 хв робочого часу (не 20:00–08:00 і не у вихідні)", gl.posted[-1])
 
@@ -3293,7 +3296,7 @@ class SlackTests(TempHome):
             finding(severity="critical"), finding(line=12, severity="important"), finding(line=13, severity="minor"),
             finding(line=14, confidence="low", body="guess")]}
         job = {**FinishTests.JOB, "title": "Fix quota"}
-        wr.finish_job(FakeGL(), job, fs, wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None,
+        wr.finish_job(FakeGL(), job, fs, wr.parse_diff(DIFF), REFS, {**wr.DEFAULTS, **OPT_IN}, notify=lambda m, sound=False: None,
                       slack=lambda *a, **kw: pings.append((a[1:], kw)))
         (what, project, iid, title, url), kw = pings[0]
         self.assertEqual((what, project, iid, title, url), ("drafts ready", "group/m-seq", 142, "Fix quota", URL))

@@ -81,7 +81,8 @@ class Machine:
         self.home.mkdir()
         (self.home / "config.json").write_text(json.dumps({"notify": False, "roots": [],
                                                            "quiet_hours": None,
-                                                           "require_green_ci": False}))  # fake has no pipelines; model: plugin default; any hour
+                                                           "require_green_ci": False,  # fake has no pipelines
+                                                           "autopublish_after_min": 30}))  # opt-in; the scenario tests it; model: plugin default; any hour
         (self.home / "repos.json").write_text(json.dumps({PROJECT: str(clone)}))
         self.env = {**os.environ, "WIZ_REVIEW_HOME": str(self.home), "GITLAB_PERSONAL_ACCESS_TOKEN": token,
                     "WIZ_REVIEW_GITLAB_HOST": gl.host, "WIZ_REVIEW_GITLAB_SCHEME": "http", "WIZ_REVIEW_FAST": "1"}

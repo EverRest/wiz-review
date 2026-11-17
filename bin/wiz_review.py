@@ -60,9 +60,9 @@ DEFAULTS = {
     "small_diff_lines": 60,
     "max_diff_lines": 3000,     # diff lines embedded in the packet; the rest is read on demand
     "max_inline": 20,           # inline drafts per review; overflow goes to the summary
-    "require_green_ci": True,   # review only once the head commit's pipeline is not running / not red (see ci_gate)
+    "require_green_ci": False,  # on: review only once the head commit's pipeline is not running / not red (see ci_gate)
     "ci_wait_max_min": 30,      # waiting for a pipeline that is running or missing: review anyway after this long
-    "autopublish_after_min": 30,  # untouched drafts are published after this many minutes; 0 = never
+    "autopublish_after_min": 0,  # off by default; N = untouched drafts are published after N minutes
     "notify": True,             # local desktop notification
     "slack_webhook": None,      # optional Slack incoming webhook: a short ping when drafts are ready / about to autopublish
     "lenses": [],               # extra focused Claude passes after the main review: security, tests, errors (each ~ one more review of cost)
