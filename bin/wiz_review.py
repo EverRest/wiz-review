@@ -452,7 +452,7 @@ def _snapshot_path(project, iid):
     return home() / "state" / f"{_key(project, iid)}.snapshot.json"
 
 
-def save_snapshot(project, iid, drafts, before_ids, summary_id=None, model=None, familiarity=None):
+def save_snapshot(project, iid, drafts, before_ids, summary_id=None, model=None):
     """Job-owned: the drafts this run created (and the human drafts that were there before)."""
     before = [str(i) for i in before_ids]
     ids = {}
@@ -461,8 +461,7 @@ def save_snapshot(project, iid, drafts, before_ids, summary_id=None, model=None,
         ids[str(d["id"])] = {"hash": _hash(d.get("note")), "body": d.get("note") or "",
                              "path": pos.get("new_path"), "line": pos.get("new_line"),
                              "summary": str(d["id"]) == str(summary_id)}
-    write_snapshot(project, iid, {"ids": ids, "before": [i for i in before if i not in ids],
-                                  "model": model, "familiarity": familiarity})
+    write_snapshot(project, iid, {"ids": ids, "before": [i for i in before if i not in ids], "model": model})
 
 
 def write_snapshot(project, iid, snap):
@@ -520,13 +519,6 @@ def forget_lessons(project, numbers=None):
 TAG_RE = re.compile(r"\n\n🤖 _wiz-review · .*_\s*$")  # the attribution line agent_tag() appends
 
 
-def rejected_drafts(snap, my_notes):
-    """Agent drafts the reviewer deleted: not the summary, not published (same body, or a diff note on the same line)."""
-    bodies = {n.get("body") for n in my_notes}
-    anchors = {((n.get("position") or {}).get("new_path"), (n.get("position") or {}).get("new_line"))
-               for n in my_notes if n.get("position")}
-    return [TAG_RE.sub("", v["body"]) for v in snap["ids"].values()
-            if not v.get("summary") and v["body"] not in bodies and (v.get("path"), v.get("line")) not in anchors]
 
 
 def add_rule(project, text):
@@ -659,19 +651,8 @@ def log_metric(rec):
         f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), **rec}, ensure_ascii=False) + "\n")
 
 
-def log_round(project, outcome, model, drafts, deleted, familiarity=None):
-    """Pilot data: per closed round, how many agent drafts the reviewer kept (gap 5 waits for this)."""
-    p = home() / "rounds.jsonl"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
-        f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "project": project, "outcome": outcome,
-                            "model": model, "drafts": drafts, "deleted": deleted,
-                            **({"familiarity": familiarity} if familiarity else {})}) + "\n")
 
 
-def _rounds():
-    p = home() / "rounds.jsonl"
-    return [json.loads(x) for x in p.read_text().splitlines() if x.strip()] if p.exists() else []
 
 
 def stats():
@@ -690,7 +671,7 @@ def stats():
             "cost_usd": usd,
             "tokens_in": sum(r.get("tokens_in") or 0 for r in rows), "tokens_out": sum(r.get("tokens_out") or 0 for r in rows),
             "avg_duration_s": (sum(durs) / len(durs)) if durs else 0,
-            "findings": sum(r.get("findings") or 0 for r in rows), "by_model": by_model, "rounds": _rounds()}
+            "findings": sum(r.get("findings") or 0 for r in rows), "by_model": by_model}
 
 
 def stats_text(st):
@@ -702,43 +683,11 @@ def stats_text(st):
         lines.append(f"  {name}: {m['reviews']} review{'' if m['reviews'] == 1 else 's'}, "
                      f"{fmt_tokens(m['tokens_in'])} in / {fmt_tokens(m['tokens_out'])} out, "
                      f"${fmt_money(m['cost_usd'])}")
-    rounds = st.get("rounds") or []
-    if rounds:
-        lines.append(f"{len(rounds)} round{'' if len(rounds) == 1 else 's'} closed")
-        kept = {}
-        for r in rounds:
-            k = kept.setdefault(r.get("model") or "unknown model", [0, 0])
-            k[0] += (r.get("drafts") or 0) - (r.get("deleted") or 0)
-            k[1] += r.get("drafts") or 0
-        for name, (k, n) in sorted(kept.items()):
-            lines.append(f"  {name}: {k}/{n} agent drafts kept ({round(100 * k / n) if n else 0}%)")
-        hint = kept_hint(kept)
-        if hint:
-            lines.append(hint)
-        by_fam = {}
-        for r in rounds:  # recorded since 0.8.0; older rounds have no level and are left out
-            if r.get("familiarity"):
-                k = by_fam.setdefault(r["familiarity"], [0, 0])
-                k[0] += (r.get("drafts") or 0) - (r.get("deleted") or 0)
-                k[1] += r.get("drafts") or 0
-        if by_fam:
-            lines.append("  by reviewer familiarity: " + ", ".join(
-                f"{lvl} {k}/{n} kept ({round(100 * k / n) if n else 0}%)" for lvl in ("high", "medium", "low")
-                if lvl in by_fam for k, n in [by_fam[lvl]]))
     return "\n".join(lines)
 
 
-HINT_MIN_DRAFTS = 20  # every compared model needs this many agent drafts before the numbers say anything
 
 
-def kept_hint(kept):
-    """One plain line comparing models by kept-rate, only when each has enough drafts. Never changes the config."""
-    rows = [(name, k, n) for name, (k, n) in kept.items() if n and name != "unknown model"]
-    if len(rows) < 2 or any(n < HINT_MIN_DRAFTS for _, _, n in rows):
-        return None
-    rows.sort(key=lambda r: -r[1] / r[2])
-    return "  hint: " + " vs ".join(f"{name}: {round(100 * k / n)}%{' kept' if i == 0 else ''} (n={n})"
-                                    for i, (name, k, n) in enumerate(rows))
 
 
 # --- local checkouts -------------------------------------------------------------
@@ -963,12 +912,6 @@ SCHEMA = {
 }
 
 
-FAM_HINT = {
-    "high": "This reviewer wrote about {pct}% of the recent commits to these files: they know this area well. "
-            "Be strict; they will catch a shallow review.",
-    "low": "This reviewer wrote only about {pct}% of the recent commits to these files: they rarely work here. "
-           "When you are unsure, say so explicitly and use confidence 'medium' instead of guessing.",
-}
 
 
 def _untrusted(text):
@@ -1032,9 +975,6 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, lessons=None, k
         parts.append("## Already raised (open threads and pending drafts) — do not report these again"
                      + ("; in the summary, say which of them the new commits fix" if since else "")
                      + "\n" + _untrusted("\n".join(f"- {t}" for t in meta["earlier"])))
-    fam = meta.get("familiarity")
-    if fam and fam["level"] in FAM_HINT:
-        parts.append("## Reviewer familiarity\n" + FAM_HINT[fam["level"]].format(pct=round(fam["score"] * 100)))
     if meta.get("my_commits"):
         parts.append("## Recent commits by this reviewer to these files (their own work in this area; context only)\n"
                      + _untrusted("\n".join(f"- {t}" for t in meta["my_commits"])))
@@ -1434,10 +1374,6 @@ class GitLab:
         """A To-Do for the token owner on this MR (GitLab answers 304 if one is already open)."""
         self._req("POST", self._mrp(project, iid) + "/todo")
 
-    def merged_mrs(self, project, limit):
-        return self._req("GET", f"/projects/{urllib.parse.quote(project, safe='')}/merge_requests",
-                         {"state": "merged", "order_by": "updated_at", "sort": "desc",
-                          "per_page": min(max(int(limit), 1), 100)})[0]
 
     def drafts(self, project, iid):
         return self._all(self._mrp(project, iid) + "/draft_notes")
@@ -1819,10 +1755,7 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
         cur = gl.drafts(project, iid)
         if not set(snap["ids"]) & {str(d["id"]) for d in cur}:  # reviewer published/deleted them by hand
             mine = [n for n in notes if _user(n["author"]) == me]
-            rejected = rejected_drafts(snap, mine)  # only counted for stats: a deletion is not a rule
             add_history(project, kept_comments(snap, mine) + edit_pairs(snap, mine))
-            log_round(project, "human", snap.get("model"), familiarity=snap.get("familiarity"),
-                      drafts=sum(1 for v in snap["ids"].values() if not v.get("summary")), deleted=len(rejected))
             gl.post_note(project, iid, f"<!-- wiz-review:done sha={ready.sha} -->\n✅ @{me}: рев'юер опрацював чернетки.")
             drop_snapshot(project, iid)
             return "closed"
@@ -1953,8 +1886,6 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
         body = msg_for(cfg)["fallback_title"] + "\n\n" + findings["summary"].strip()
         if fs:
             body += "\n\n" + "\n".join(_line(f) for f in fs)
-        if findings.get("familiarity"):
-            body += f"\n\n_{findings['familiarity']}_"
         gl.post_note(project, iid, body + f"\n\n{agent_tag(findings.get('agent'))}")
         _todo(gl, project, iid)
         notify(f"Авто-рев'ю готове: {project}!{iid}", sound=True)
@@ -1977,7 +1908,7 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
                 failed.append(item["finding"])  # GitLab refused the anchor: keep the finding, lose only the position
         if failed:
             summary += "\n\n" + "\n".join(_line(f) for f in failed)
-        fam = "".join(f"\n\n_{findings[k]}_" for k in ("familiarity", "notes_used") if findings.get(k))
+        fam = "".join(f"\n\n_{findings[k]}_" for k in ("notes_used",) if findings.get(k))
         summary_draft = gl.create_draft(project, iid, f"**{msg_for(cfg)['summary']}**\n\n" + summary + fam
                                         + f"\n\n{agent_tag(findings.get('agent'))}")
         created.append(summary_draft)
@@ -2001,8 +1932,7 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
         if not stored:
             rollback()
             raise
-    save_snapshot(project, iid, created, before, summary_id=summary_draft["id"],
-                  model=agent.get("model"), familiarity=findings.get("familiarity_level"))
+    save_snapshot(project, iid, created, before, summary_id=summary_draft["id"], model=agent.get("model"))
     _todo(gl, project, iid)
     notify(f"Чернетки рев'ю готові: {project}!{iid} ({len(created)})", sound=True)
     counts = {}
@@ -2123,128 +2053,6 @@ def dry_review(gl, url, model=None, run=None):
         return "GitLab writes (none were made):\n\n" + dry_report(dry.writes)
 
 
-# --- bench: does the plugin find what the humans found? --------------------------------------
-
-BENCH_ABLATE = ("history", "guides", "fixes", "familiarity")
-BENCH_NEAR = 5     # a finding "hits" a human comment: same file, lines at most this far apart
-BENCH_SCAN = 100   # merged MRs looked at to find `limit` of them with human review comments
-
-
-class BenchGitLab(DryRunGitLab):
-    """A dry run on an already MERGED MR. Writes are recorded, never sent. The humans' notes and threads are hidden from
-    the review: otherwise 'already raised' would hand the model the answer."""
-
-    def notes(self, project, iid):
-        return []
-
-    def discussions(self, project, iid):
-        return []
-
-
-def human_comments(notes, author):
-    """Inline comments written by people other than the MR author: [{path, line, body}]."""
-    out = []
-    for n in notes:
-        pos = n.get("position") or {}
-        body = n.get("body") or ""
-        if (n.get("system") or not pos.get("new_path") or not pos.get("new_line")
-                or (n.get("author") or {}).get("username") == author or "🤖 _wiz-review" in body):
-            continue
-        out.append({"path": pos["new_path"], "line": int(pos["new_line"]), "body": body})
-    return out
-
-
-def bench_select(gl, project, limit):
-    """[(mr, human_comments)] for the newest merged MRs that have at least one human inline comment."""
-    picked = []
-    for mr in gl.merged_mrs(project, BENCH_SCAN):
-        humans = human_comments(gl.notes(project, mr["iid"]), _user(mr["author"]))
-        if humans:
-            picked.append((mr, humans))
-        if len(picked) >= limit:
-            break
-    return picked
-
-
-def bench_match(humans, found):
-    """-> (human comments that some finding hit, findings that hit some human comment). found: [(path, line)]."""
-    near = lambda h, f: h["path"] == f[0] and abs(h["line"] - f[1]) <= BENCH_NEAR
-    return sum(any(near(h, f) for f in found) for h in humans), sum(any(near(h, f) for h in humans) for f in found)
-
-
-def _draft_positions(writes):
-    out = []
-    for w in writes:
-        if w["call"] == "create_draft":
-            pos = w.get("position", w["args"][3] if len(w["args"]) > 3 else None)
-            if pos and pos.get("new_path") and pos.get("new_line"):
-                out.append((pos["new_path"], int(pos["new_line"])))
-    return out
-
-
-def _pct(a, b):
-    return f"{round(100 * a / b)}%" if b else "n/a"
-
-
-def bench(gl, project, limit=10, model=None, ablate=(), run=None, confirm=None, cfg=None):
-    """Run the real review (git + claude) on past merged MRs and compare its inline findings with what people wrote.
-    Nothing is posted. -> (report text, result dict)."""
-    run, cfg = run or run_job, cfg or load_config()
-    if model is not None and not valid_model(model):
-        raise SystemExit(f"not a model name: {model!r}")
-    bad = [a for a in ablate if a not in BENCH_ABLATE]
-    if bad:
-        raise SystemExit(f"unknown --ablate: {', '.join(bad)} (allowed: {', '.join(BENCH_ABLATE)})")
-    repo = find_repo(project, cfg)
-    if not repo:
-        raise SystemExit(f"no local checkout for {project}; clone it under one of the `roots` in ~/.wiz-review/config.json")
-    picked = bench_select(gl, project, limit)
-    if not picked:
-        raise SystemExit(f"no merged MR of {project} with human inline comments among the last {BENCH_SCAN}")
-    plan = (f"{len(picked)} merged MRs of {project}, model {model or 'as configured'}, "
-            f"ablated: {', '.join(ablate) or 'none'}, ~{len(picked)} claude runs. Nothing is posted to GitLab.")
-    print(plan, flush=True)
-    if not (confirm and confirm(plan)):
-        raise SystemExit("not started: pass --yes to run it")
-    bcfg = {**cfg, "notify": False, "_ablate": tuple(ablate)}
-    if "history" in ablate:
-        bcfg["history_in_packet"] = 0
-    if "fixes" in ablate:
-        bcfg["fix_history"] = False
-    rows = []
-    with dry_home():
-        for mr, humans in picked:
-            iid = mr["iid"]
-            job = {"kind": "review", "project": project, "iid": iid, "url": mr["web_url"], "repo": repo, "since": None,
-                   "sha": mr.get("sha", ""), "target": mr["target_branch"], "title": mr.get("title", "")}
-            if model:
-                job["model"] = model
-            mp = home() / "metrics.jsonl"
-            before = len(mp.read_text().splitlines()) if mp.exists() else 0
-            dry = BenchGitLab(gl)
-            run(job, dry, bcfg)
-            rec = ([json.loads(x) for x in mp.read_text().splitlines()[before:]] or [{}])[-1] if mp.exists() else {}
-            found_at = _draft_positions(dry.writes)
-            hit, matched = bench_match(humans, found_at)
-            rows.append({"iid": iid, "url": mr["web_url"], "humans": len(humans), "found": hit, "findings": len(found_at),
-                         "matched": matched, "cost_usd": rec.get("cost_usd") or 0, "tokens_in": rec.get("tokens_in") or 0,
-                         "tokens_out": rec.get("tokens_out") or 0, "duration_s": rec.get("duration_s"), "error": rec.get("error")})
-    ok = [r for r in rows if not r["error"]]
-    tot = {k: sum(r[k] for r in ok) for k in ("humans", "found", "findings", "matched", "cost_usd", "tokens_in", "tokens_out")}
-    lines = [plan, ""]
-    for r in rows:
-        lines.append(f"!{r['iid']}: " + (f"FAILED ({r['error']})" if r["error"] else
-                     f"human {r['humans']}, found {r['found']} | agent {r['findings']}, matched {r['matched']} | "
-                     f"${r['cost_usd']:.3f}, {r['duration_s']} s"))
-    lines += ["", f"Found {tot['found']} of {tot['humans']} human inline comments ({_pct(tot['found'], tot['humans'])}). "
-              f"{tot['matched']} of {tot['findings']} agent inline findings landed on a line a human also commented "
-              f"({_pct(tot['matched'], tot['findings'])}). Cost ${tot['cost_usd']:.3f}, "
-              f"{fmt_tokens(tot['tokens_in'])} in / {fmt_tokens(tot['tokens_out'])} out"
-              + (f"; {len(rows) - len(ok)} MR(s) failed and are not counted." if len(ok) < len(rows) else "."),
-              "Matching is a proxy: same file, lines within %d. Compare two runs (with and without --ablate) on the same MRs." % BENCH_NEAR]
-    return "\n".join(lines), {"project": project, "model": model, "ablate": list(ablate), "mrs": rows, "total": tot}
-
-
 FETCH_TIMEOUT_SEC = 120
 
 
@@ -2320,8 +2128,6 @@ def packet_context(gl, project, iid, mr, repo, base, head_sha):
     return ctx
 
 
-FAM_HIGH, FAM_LOW = 0.30, 0.05  # share of recent commits to the changed files written by this person
-FAM_LOG_N, FAM_MAX_FILES, FAM_MIN_COMMITS = 200, 50, 5
 
 
 def diff_files(diff_text, extra):
@@ -2343,41 +2149,16 @@ def git_email(repo):
     return r.stdout.strip().lower() if r.returncode == 0 else ""
 
 
-def familiarity(repo, base, files, email):
-    """Share of the last FAM_LOG_N non-merge commits per changed file that `email` wrote, weighted by changed lines.
-    -> {"score", "level"}, or None when it cannot be told: no email, shallow clone, renames (the old name's history is
-    not followed), too few commits. New files carry no history and are left out."""
-    if not email or not files or any(f[2] for f in files):
-        return None
-    if _git_out(["git", "rev-parse", "--is-shallow-repository"], repo).strip() == "true":
-        return None
-    total = weight = 0
-    acc = 0.0
-    for path, lines, _ in files[:FAM_MAX_FILES]:
-        who = _git_out(["git", "--literal-pathspecs", "log", "--no-merges", "--format=%ae", "-n", str(FAM_LOG_N),
-                        _check(SHA_RE, base, "sha"), "--", _check(PATH_RE, path, "path")], repo).split()
-        if not who:
-            continue
-        w = max(lines, 1)
-        acc += w * sum(1 for e in who if e.lower() == email) / len(who)
-        weight += w
-        total += len(who)
-    if total < FAM_MIN_COMMITS:
-        return None
-    score = acc / weight
-    return {"score": score, "level": "high" if score >= FAM_HIGH else "low" if score < FAM_LOW else "medium"}
 
 
-def familiarity_line(fam, who):
-    return f"{who} familiarity with these files: {fam['level']} ({round(fam['score'] * 100)}% of recent commits)"
 
 
 def reviewer_context(project, repo, base, diff, cfg, kind):
     """Who is running this review and what they did here before. Each piece is best effort, like packet_context.
-    A fallback runs as the author: only the familiarity line for the summary, no examples of 'taste'."""
+    A fallback runs as the author: no examples of 'taste'."""
     files, ctx, email = diff_files(diff, cfg["exclude"]), {}, git_email(repo)
-    names = [f[0] for f in files[:FAM_MAX_FILES]]
-    pieces = [("familiarity", lambda: familiarity(repo, base, files, email))]
+    names = [f[0] for f in files[:50]]
+    pieces = []
     if kind == "review" and cfg.get("history_in_packet"):
         pieces += [("my_commits", lambda: list(dict.fromkeys(
                         scrub(ln[:200]) for ln in _git_out(
@@ -2463,7 +2244,7 @@ def pin_head(repo, iid, sha):
 
 def review_packet(gl, job, mr, refs, cfg, repo):
     """The packet a review reads, built the same way for the background review and for `mr-context`.
-    -> {packet, pst, meta, fam, full}. Calls no model; writes nothing to GitLab."""
+    -> {packet, pst, meta, full}. Calls no model; writes nothing to GitLab."""
     project, iid = job["project"], int(job["iid"])
     full = _git_out(diff_args(iid, refs["base_sha"]), repo)
     since = job.get("since")
@@ -2477,12 +2258,8 @@ def review_packet(gl, job, mr, refs, cfg, repo):
     meta = {"url": job["url"], "title": mr.get("title", ""), "target": mr["target_branch"], "base": since or refs["base_sha"],
             **packet_context(gl, project, iid, mr, repo, since or refs["base_sha"], refs["head_sha"])}
     rctx = reviewer_context(project, repo, refs["base_sha"], full, cfg, job["kind"])
-    fam = rctx.pop("familiarity", None)
-    if "familiarity" in cfg.get("_ablate", ()):  # bench only
-        fam = None
     try:  # repo-owned guides: read from the MR's BASE, so the MR itself cannot rewrite the guides that judge it
-        guides = [] if "guides" in cfg.get("_ablate", ()) else area_guides(
-            repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
+        guides = area_guides(repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
     except Exception as e:
         guides = []
         print(f"area guides left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
@@ -2497,12 +2274,12 @@ def review_packet(gl, job, mr, refs, cfg, repo):
         if fixes:
             meta["fixes"] = fixes
     if job["kind"] == "review":
-        meta.update(rctx, **({"familiarity": fam} if fam else {}))
+        meta.update(rctx)
     packet, pst = build_packet(meta, req, shown, cfg, since, load_lessons(project), job["kind"])
     if wide_diff(pst["changed_lines"], cfg):  # same changes, whole functions around them (anchors use `full`)
         packet, pst = build_packet(meta, req, _git_out(diff_args(iid, since or refs["base_sha"], wide=True), repo),
                                    cfg, since, load_lessons(project), job["kind"])
-    return {"packet": packet, "pst": pst, "meta": meta, "fam": fam, "full": full}
+    return {"packet": packet, "pst": pst, "meta": meta, "full": full}
 
 
 def run_job(job, gl=None, cfg=None):
@@ -2530,9 +2307,7 @@ def run_job(job, gl=None, cfg=None):
             team = {}
         cfg = apply_team(cfg, team)
         r = review_packet(gl, job, mr, refs, cfg, repo)
-        packet, pst, meta, fam, full = r["packet"], r["pst"], r["meta"], r["fam"], r["full"]
-        if fam:
-            rec["familiarity"] = fam["level"]  # stats split the kept-rate by it (going forward)
+        packet, pst, meta, full = r["packet"], r["pst"], r["meta"], r["full"]
         rec.update(diff_lines=pst["changed_lines"], truncated=pst["truncated"])
         findings = None
         if pst["changed_lines"] == 0:
@@ -2544,9 +2319,6 @@ def run_job(job, gl=None, cfg=None):
             findings, meta_out = claude_pass(job["kind"], model, cfg, repo, packet)
             rec.update(meta_out)
             findings["agent"] = make_agent(meta_out.get("model") or model or "your Claude Code model", meta_out, cfg)
-            if fam:
-                findings["familiarity"] = familiarity_line(fam, "Reviewer" if job["kind"] == "review" else "Author")
-                findings["familiarity_level"] = fam["level"]
         if findings is not None:
             rec["findings"] = len(findings["findings"])
             rec["posted"] = finish_job(gl, job, findings, parse_diff(full), refs, cfg,
@@ -2791,13 +2563,6 @@ def main(argv=None):
     g.add_argument("--model", help="model for this review only (alias like opus/sonnet/haiku, or a full id)")
     g.add_argument("--dry-run", action="store_true",
                    help="run the real review here (costs tokens) and print the drafts instead of writing them")
-    g = sub.add_parser("bench")
-    g.add_argument("--project", required=True, help="group/repo; needs a local clone")
-    g.add_argument("--limit", type=int, default=10, help="merged MRs with human inline comments to replay (default 10)")
-    g.add_argument("--model", help="model for these runs (alias or full id)")
-    g.add_argument("--ablate", default="", help="comma list of packet parts to switch off: " + ", ".join(BENCH_ABLATE))
-    g.add_argument("--yes", action="store_true", help="start without asking (the runs cost tokens)")
-    g.add_argument("--out", help="write the result as JSON to this file")
     g = sub.add_parser("diff")
     g.add_argument("--iid", type=int, required=True)
     g.add_argument("--base", required=True)
@@ -2880,13 +2645,6 @@ def main(argv=None):
     elif a.cmd == "review":  # manual: review this MR now, whether or not the author asked
         job = manual_review(gitlab_from_env(), a.url, model=a.model)
         print(f"review started in background; log: {home() / 'logs' / (_key(job['project'], job['iid']) + '.log')}")
-    elif a.cmd == "bench":
-        text, result = bench(gitlab_from_env(), a.project, max(a.limit, 1), a.model,
-                             tuple(x.strip() for x in a.ablate.split(",") if x.strip()),
-                             confirm=lambda plan: a.yes or (sys.stdin.isatty() and input("Proceed? [y/N] ").strip().lower() == "y"))
-        print(text)
-        if a.out:
-            Path(a.out).write_text(json.dumps(result, ensure_ascii=False, indent=2))
     elif a.cmd == "diff":
         return subprocess.run(diff_args(a.iid, a.base, a.path)).returncode
     elif a.cmd == "show":

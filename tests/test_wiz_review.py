@@ -593,10 +593,6 @@ class AttributionTests(TempHome):
         self.assertIn("LOSTINLINE", gl.created[-1]["note"])
         self.assertTrue(gl.created[-1]["note"].rstrip().endswith(TAG))
 
-    def test_lessons_do_not_store_the_tag(self):
-        snap = {"ids": {"1": {"hash": "h", "body": f"use bcmath\n\n{TAG}", "path": "a.php", "line": 3, "summary": False}},
-                "before": []}
-        self.assertEqual(wr.rejected_drafts(snap, []), ["use bcmath"])
 
     def test_pickup_note_names_tool_and_configured_models(self):
         gl = FakeGL()
@@ -670,13 +666,6 @@ class StatsTextTests(TempHome):
         self.assertNotIn("kept", wr.stats_text(wr.stats()))
 
     # --- gap 5: collect acceptance data in the pilot (no positive examples yet) ---
-    def test_stats_show_kept_rate_per_model(self):
-        wr.log_round("g/r", "human", "claude-haiku-5-5", drafts=4, deleted=1)
-        wr.log_round("g/r", "auto", "claude-haiku-5-5", drafts=2, deleted=0)
-        t = wr.stats_text(wr.stats())
-        self.assertIn("2 rounds closed", t)
-        self.assertIn("claude-haiku-5-5: 5/6 agent drafts kept (83%)", t)
-        self.assertEqual(wr.stats()["reviews"], 0)  # a closed round is not a review
 
 
 class CommandTests(unittest.TestCase):
@@ -951,7 +940,6 @@ class TickTests(TempHome):
         self.tick(now="2026-11-13T09:25:00Z")
         self.assertTrue(self.gl.posted[-1].startswith("<!-- wiz-review:done sha=aaa111 -->"))
         self.assertEqual(wr.load_lessons("group/m-seq"), [])  # a deletion is not a rule
-        self.assertEqual(self._rounds()[-1]["deleted"], 1)  # ...but stats still count it
 
     def test_human_close_records_the_kept_comment_as_the_reviewer_left_it(self):
         self._ready_state()  # agent drafts 1 (Foo.php:11), 2 (Foo.php:12) + summary 3
@@ -991,19 +979,7 @@ class TickTests(TempHome):
         self.assertEqual([(p["path"], p["after"]) for p in wr.edit_pairs(snap, mine)], [("b.php", "reviewer wording")])
 
 
-    def _rounds(self):
-        p = self.home / "rounds.jsonl"
-        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
-    def test_closed_round_is_recorded_for_the_pilot(self):
-        self._ready_state()  # agent drafts 1, 2 + summary 3
-        self.gl.draft_list = []
-        n = note("pavlo", "09:20", "a, but reworded")
-        n["position"] = {"new_path": "app/Foo.php", "new_line": 11}  # 1 kept (edited), 2 deleted
-        self.gl.notes_by[self.key].append(n)
-        self.tick(now="2026-11-13T09:25:00Z")
-        r = self._rounds()[-1]
-        self.assertEqual((r["outcome"], r["drafts"], r["deleted"], r["project"]), ("human", 2, 1, "group/m-seq"))
 
 
 
@@ -1024,13 +1000,6 @@ class TickTests(TempHome):
     # --- reviewer alerts ---
 
 
-    def test_closed_round_records_the_familiarity_level_for_stats(self):
-        self._ready_state()
-        wr.save_snapshot("group/m-seq", 142, self.gl.draft_list, before_ids=[], summary_id=3, familiarity="high")
-        self.gl.draft_list = []  # the reviewer published or deleted them by hand
-        self.tick(now="2026-11-13T09:41:00Z")
-        self.assertEqual(wr._rounds()[-1]["familiarity"], "high")
-        self.assertEqual(wr._rounds()[-1]["drafts"], 2)
 
 
 
@@ -2186,7 +2155,7 @@ class GitLabClientTests(unittest.TestCase):
         self.assertNotIn("secret-tok", str(e.exception))
 
 
-# --- reviewer context: familiarity (point 1) and the reviewer's history (point 2) ---------------
+# --- reviewer context: the reviewer's own commits and history ---------------
 
 def _commit(repo, name, email, path, text, msg):
     Path(repo, path).parent.mkdir(parents=True, exist_ok=True)
@@ -2207,45 +2176,10 @@ def _repo(root, mine=1, others=4, path="app/pay.py"):
 
 
 class FamiliarityTests(unittest.TestCase):
-    def fam(self, repo, base, files, email="me@x.com"):
-        return wr.familiarity(repo, base, files, email)
 
-    def test_levels_follow_the_share_of_recent_commits(self):
-        for mine, others, level in ((4, 1, "high"), (1, 4, "medium"), (1, 20, "low")):
-            with tempfile.TemporaryDirectory() as r:
-                head = _repo(r, mine, others)
-                f = self.fam(r, head, [("app/pay.py", 10, False)])
-                self.assertEqual(f["level"], level, (mine, others, f))
-                self.assertAlmostEqual(f["score"], mine / (mine + others))
 
-    def test_weighted_by_changed_lines(self):
-        with tempfile.TemporaryDirectory() as r:
-            _repo(r, mine=0, others=5, path="big.py")  # Ivan only
-            for i in range(5):
-                _commit(r, "Me", "me@x.com", "small.py", f"s{i}\n", f"small {i}")
-            head = _git(r, "rev-parse", "HEAD")
-            f = self.fam(r, head, [("big.py", 90, False), ("small.py", 10, False)])
-            self.assertAlmostEqual(f["score"], 0.10)  # small.py is all mine but weighs 10%
-            self.assertEqual(f["level"], "medium")
 
-    def test_unknown_when_it_cannot_be_told(self):
-        with tempfile.TemporaryDirectory() as r:
-            head = _repo(r, 2, 3)
-            ok = [("app/pay.py", 5, False)]
-            self.assertIsNotNone(self.fam(r, head, ok))
-            self.assertIsNone(self.fam(r, head, ok, email=""))  # no git email
-            self.assertIsNone(self.fam(r, head, [("app/pay.py", 5, True)]))  # a rename: history is under the old name
-            self.assertIsNone(self.fam(r, head, []))
-            self.assertIsNone(self.fam(r, head, [("brand/new.py", 5, False)]))  # new file: no history at all
-            self.assertIsNone(self.fam(r, head, [("app/pay.py", 5, False), ("brand/new.py", 5, False)][1:]))
-            with tempfile.TemporaryDirectory() as shallow:
-                subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{r}", shallow], check=True)
-                self.assertIsNone(self.fam(shallow, head, ok))  # a shallow clone only shows the tip
 
-    def test_too_few_commits_is_unknown_not_a_confident_100_percent(self):
-        with tempfile.TemporaryDirectory() as r:
-            head = _repo(r, mine=1, others=0)
-            self.assertIsNone(self.fam(r, head, [("app/pay.py", 5, False)]))
 
     def test_diff_files_skips_noise_and_flags_renames(self):
         diff = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1,2 @@\n x\n+y\n"
@@ -2254,18 +2188,6 @@ class FamiliarityTests(unittest.TestCase):
         self.assertEqual(wr.diff_files(diff, []), [("a.py", 1, False), ("new.py", 0, True)])
 
 
-    def test_packet_tells_the_model_how_much_the_reviewer_knows(self):
-        meta = {"url": URL, "target": "develop", "title": "T"}
-        build = lambda **m: wr.build_packet({**meta, **m}, "", DIFF, wr.DEFAULTS)[0]  # noqa: E731
-        high = build(familiarity={"level": "high", "score": 0.41})
-        self.assertIn("## Reviewer familiarity", high)
-        self.assertIn("41%", high)
-        self.assertIn("know this area well", high)
-        low = build(familiarity={"level": "low", "score": 0.02})
-        self.assertIn("rarely work here", low)
-        self.assertIn("confidence 'medium'", low)
-        for m in (build(familiarity={"level": "medium", "score": 0.2}), build()):
-            self.assertNotIn("Reviewer familiarity", m)
 
     def test_packet_history_sections_are_data_and_optional(self):
         meta = {"url": URL, "target": "develop", "title": "T"}
@@ -2279,10 +2201,6 @@ class FamiliarityTests(unittest.TestCase):
         self.assertNotIn("How this reviewer reviewed", bare)
         self.assertNotIn("Recent commits by this reviewer", bare)
 
-    def test_summary_line_is_deterministic_and_labelled(self):
-        line = wr.familiarity_line({"level": "high", "score": 0.414}, "Reviewer")
-        self.assertEqual(line, "Reviewer familiarity with these files: high (41% of recent commits)")
-        self.assertTrue(wr.familiarity_line({"level": "low", "score": 0.0}, "Author").startswith("Author familiarity"))
 
 
 class ReviewerContextTests(TempHome):
@@ -2301,22 +2219,20 @@ class ReviewerContextTests(TempHome):
 
     def test_review_gets_familiarity_commits_and_history(self):
         c = self.ctx()
-        self.assertEqual(c["familiarity"]["level"], "high")  # 3 of 5
         self.assertEqual(c["my_commits"], ["change 4 by Me", "change 3 by Me", "change 2 by Me"])
         self.assertEqual(len(c["history"]), 1)
         self.assertIn("bcmath", c["history"][0])
 
     def test_fallback_runs_as_the_author_and_gets_no_examples(self):
         c = self.ctx("fallback")
-        self.assertEqual(list(c), ["familiarity"])
+        self.assertEqual(list(c), [])
 
     def test_history_in_packet_zero_switches_history_off(self):
-        self.assertEqual(list(self.ctx(history_in_packet=0)), ["familiarity"])
+        self.assertEqual(list(self.ctx(history_in_packet=0)), [])
 
     def test_nothing_known_is_not_an_error(self):
         _git(self.r.name, "config", "user.email", "")
         c = self.ctx()
-        self.assertNotIn("familiarity", c)
         self.assertNotIn("my_commits", c)
         self.assertEqual(len(c["history"]), 1)  # the stored comments still help
 
@@ -2399,31 +2315,6 @@ class ReviewerContextConfigTests(TempHome):
 
 
 
-class FamiliarityInNotesTests(TempHome):
-    JOB = FinishTests.JOB
-
-    def test_review_summary_draft_carries_the_line_before_the_tag(self):
-        gl = FakeGL()
-        fs = {"summary": "S", "agent": AGENT, "findings": [],
-              "familiarity": "Reviewer familiarity with these files: high (41% of recent commits)"}
-        wr.finish_job(gl, self.JOB, fs, wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
-        note_ = gl.created[-1]["note"]
-        self.assertIn("_Reviewer familiarity with these files: high (41% of recent commits)_", note_)
-        self.assertLess(note_.index("Reviewer familiarity"), note_.index("🤖"))
-
-    def test_fallback_note_is_labelled_as_the_authors(self):
-        gl = FakeGL()
-        fs = {"summary": "S", "agent": AGENT, "findings": [],
-              "familiarity": wr.familiarity_line({"level": "high", "score": 0.9}, "Author")}
-        wr.finish_job(gl, {**self.JOB, "kind": "fallback"}, fs, wr.parse_diff(DIFF), REFS, wr.DEFAULTS,
-                      notify=lambda m, sound=False: None)
-        self.assertIn("Author familiarity with these files: high (90% of recent commits)", gl.posted[-1])
-
-    def test_unknown_adds_nothing(self):
-        gl = FakeGL()
-        wr.finish_job(gl, self.JOB, {"summary": "S", "agent": AGENT, "findings": []}, wr.parse_diff(DIFF), REFS,
-                      wr.DEFAULTS, notify=lambda m, sound=False: None)
-        self.assertNotIn("familiarity", gl.created[-1]["note"])
 
 
 # --- Model stats -----------------------------------------------
@@ -2453,142 +2344,8 @@ def claude_json(findings, cost=0.01, summary="main"):
 
 
 
-class KeptStatsTests(TempHome):
-    def rounds(self, model, drafts, deleted, n=1, familiarity=None):
-        for _ in range(n):
-            wr.log_round("g/r", "human", model, drafts=drafts, deleted=deleted, familiarity=familiarity)
-
-    def test_hint_compares_models_once_each_has_enough_drafts(self):
-        self.rounds("sonnet", 4, 1, n=12)   # 48 drafts, 36 kept: 75%
-        self.rounds("haiku", 4, 3, n=13)    # 52 drafts, 13 kept: 25%
-        t = wr.stats_text(wr.stats())
-        self.assertIn("  hint: sonnet: 75% kept (n=48) vs haiku: 25% (n=52)", t)
-        self.assertIn("sonnet: 36/48 agent drafts kept (75%)", t)
-
-    def test_no_hint_when_a_model_has_too_few_drafts_or_only_one_is_compared(self):
-        self.rounds("sonnet", 4, 1, n=12)
-        self.rounds("haiku", 4, 3, n=4)  # 16 drafts: not enough
-        self.assertNotIn("hint:", wr.stats_text(wr.stats()))
-        self.assertIsNone(wr.kept_hint({"sonnet": [30, 48]}))
-        self.assertIsNone(wr.kept_hint({"sonnet": [30, 48], "unknown model": [10, 50]}))  # unknown is not a model
-
-    def test_threshold_is_twenty_inclusive(self):
-        self.assertIsNotNone(wr.kept_hint({"a": [10, 20], "b": [5, 20]}))
-        self.assertIsNone(wr.kept_hint({"a": [10, 20], "b": [5, 19]}))
-
-    def test_hint_never_touches_the_config(self):
-        self.rounds("sonnet", 4, 1, n=12)
-        self.rounds("haiku", 4, 3, n=13)
-        wr.stats_text(wr.stats())
-        self.assertFalse((self.home / "config.json").exists())
-
-    def test_kept_rate_is_split_by_familiarity_when_recorded(self):
-        self.rounds("haiku", 4, 0, n=2, familiarity="high")   # 8/8
-        self.rounds("haiku", 4, 2, n=2, familiarity="low")    # 4/8
-        self.rounds("haiku", 4, 4, n=1)                       # an older round without a level is left out
-        t = wr.stats_text(wr.stats())
-        self.assertIn("by reviewer familiarity: high 8/8 kept (100%), low 4/8 kept (50%)", t)
-
-    def test_no_split_line_without_recorded_levels(self):
-        self.rounds("haiku", 4, 1, n=2)
-        self.assertNotIn("familiarity", wr.stats_text(wr.stats()))
-        self.assertNotIn("familiarity", wr._rounds()[0])  # old row shape unchanged
 
 
-class BenchTests(TempHome):
-    P = "group/m-seq"
-
-    def human(self, path="a.py", line=10, user="olena", body="this can be null", system=False, pos=True):
-        n = {"id": 1, "body": body, "system": system, "author": {"username": user}}
-        if pos:
-            n["position"] = {"new_path": path, "new_line": line}
-        return n
-
-    class GL:
-        def __init__(self, mrs, notes):
-            self.mrs, self._notes, self.writes = mrs, notes, []
-
-        def merged_mrs(self, project, limit):
-            return self.mrs
-
-        def notes(self, project, iid):
-            return self._notes.get(iid, [])
-
-        def post_note(self, *a):
-            self.writes.append(a)
-
-        def create_draft(self, *a, **k):
-            self.writes.append(a)
-
-    def mr(self, iid, author="pavlo"):
-        return {"iid": iid, "author": {"username": author}, "web_url": f"https://gitlab.wiz-team.com/{self.P}/-/merge_requests/{iid}",
-                "target_branch": "develop", "title": f"T{iid}", "sha": "abc"}
-
-    def test_human_comments_keep_only_inline_notes_of_other_people(self):
-        notes = [self.human(), self.human(system=True), self.human(pos=False), self.human(user="pavlo"),
-                 self.human(body="x\n\n🤖 _wiz-review · Claude Code · haiku_"), self.human(path="b.py", line=3)]
-        got = wr.human_comments(notes, "pavlo")
-        self.assertEqual([(c["path"], c["line"]) for c in got], [("a.py", 10), ("b.py", 3)])
-
-    def test_select_takes_the_newest_mrs_that_have_human_comments_up_to_the_limit(self):
-        gl = self.GL([self.mr(1), self.mr(2), self.mr(3), self.mr(4)],
-                     {2: [self.human()], 3: [self.human(user="pavlo")], 4: [self.human()]})
-        self.assertEqual([m["iid"] for m, _ in wr.bench_select(gl, self.P, 5)], [2, 4])  # 1 none, 3 only the author's own
-        self.assertEqual([m["iid"] for m, _ in wr.bench_select(gl, self.P, 1)], [2])
-
-    def test_matching_rule_same_file_and_within_five_lines(self):
-        humans = [{"path": "a.py", "line": 10}, {"path": "a.py", "line": 40}, {"path": "b.py", "line": 1}]
-        found = [("a.py", 15), ("a.py", 16), ("c.py", 1)]
-        self.assertEqual(wr.bench_match(humans, found), (1, 1))  # a.py:15 hits 10; 16 is too far; other file never
-        self.assertEqual(wr.bench_match(humans, []), (0, 0))
-
-    def run_bench(self, ablate=(), confirm=lambda plan: True, repo="/tmp/clone", **kw):
-        cfgs, hidden = [], []
-        gl = self.GL([self.mr(7)], {7: [self.human(path="a.py", line=10), self.human(path="a.py", line=90)]})
-
-        def run(job, dry, cfg):
-            cfgs.append((job, cfg))
-            hidden.append((dry.notes(self.P, 7), gl.notes(self.P, 7)))
-            dry.create_draft(self.P, 7, "finding", {"new_path": "a.py", "new_line": 12})
-            dry.create_draft(self.P, 7, "elsewhere", {"new_path": "z.py", "new_line": 1})
-            dry.create_draft(self.P, 7, "summary")  # no position: not an inline finding
-            dry.post_note(self.P, 7, "note")
-            wr.log_metric({"kind": "review", "project": self.P, "iid": 7, "cost_usd": 0.02, "tokens_in": 1000,
-                           "tokens_out": 50, "duration_s": 3})
-        orig, wr.find_repo = wr.find_repo, lambda *a, **k: repo
-        try:
-            out = wr.bench(gl, self.P, 5, run=run, confirm=confirm, cfg={**wr.DEFAULTS, "roots": []}, ablate=ablate, **kw)
-        finally:
-            wr.find_repo = orig
-        return out, cfgs, hidden, gl
-
-    def test_bench_reports_recall_and_precision_and_posts_nothing(self):
-        (text, res), cfgs, hidden, gl = self.run_bench()
-        self.assertEqual(gl.writes, [])  # nothing reached GitLab
-        self.assertFalse((self.home / "metrics.jsonl").exists())  # the real home is untouched
-        self.assertEqual(hidden[0][0], [])  # the review never sees what the humans said ...
-        self.assertEqual(len(hidden[0][1]), 2)  # ... though bench itself can read it
-        t = res["total"]
-        self.assertEqual((t["humans"], t["found"], t["findings"], t["matched"]), (2, 1, 2, 1))
-        self.assertAlmostEqual(t["cost_usd"], 0.02)
-        self.assertIn("Found 1 of 2 human inline comments (50%)", text)
-        self.assertIn("1 of 2 agent inline findings", text)
-        self.assertEqual(cfgs[0][0]["kind"], "review")
-
-
-    def test_nothing_runs_without_a_yes_or_a_clone(self):
-        calls = []
-        with self.assertRaises(SystemExit):
-            self.run_bench(confirm=lambda plan: calls.append(plan) or False)
-        self.assertEqual(len(calls), 1)  # asked once, said no
-        with self.assertRaises(SystemExit):
-            self.run_bench(confirm=None)
-        with self.assertRaises(SystemExit):
-            self.run_bench(repo=None)
-
-    def test_model_must_be_a_model_name(self):
-        with self.assertRaises(SystemExit):
-            self.run_bench(model="--dangerous")
 
 
 
@@ -2845,21 +2602,6 @@ class RunJobTests(TempHome):
         self.assertNotIn("Past fixes", off[0])
         self.assertIn("Past fixes in these files", fb[0])
 
-    def test_ablating_guides_and_familiarity_removes_them_from_the_packet(self):
-        o_g, o_r = wr.area_guides, wr.reviewer_context
-        wr.area_guides = lambda *a, **k: ["### g.md\nBe careful."]
-        wr.reviewer_context = lambda *a, **k: {"familiarity": {"score": 0.9, "level": "high"}}
-        try:
-            _, on, rec_on, _ = self.run_job()
-            _, off, rec_off, _ = self.run_job(_ablate=("guides", "familiarity"))
-        finally:
-            wr.area_guides, wr.reviewer_context = o_g, o_r
-        self.assertIn("Area guides written by", on[0])
-        self.assertIn("Reviewer familiarity", on[0])
-        self.assertEqual(rec_on.get("familiarity"), "high")
-        self.assertNotIn("Area guides", off[0])
-        self.assertNotIn("Reviewer familiarity", off[0])
-        self.assertNotIn("familiarity", rec_off)
 
 
 
