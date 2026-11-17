@@ -307,13 +307,13 @@ class DiffTests(unittest.TestCase):
         self.assertGreater(text.index("evil"), text.index("<<<UNTRUSTED"))  # title is data too
 
     # --- gap 1: MR description and commits; gap 2: already raised; gap 6: CI ---
-    def test_packet_carries_description_commits_ci_and_earlier_findings_as_data(self):
+    def test_packet_carries_description_commits_and_earlier_findings_as_data(self):
         meta = {"url": URL, "title": "T", "target": "develop", "description": "DESC why we do it",
-                "commits": "--- abc1234 fix the cache key", "ci": "pipeline failed: job unit (test)",
+                "commits": "--- abc1234 fix the cache key",
                 "earlier": ["app/Foo.php:11 — null check is missing (by pavlo)"]}
         text, _ = wr.build_packet(meta, "", DIFF, wr.DEFAULTS, since="abc123")
         fence = text.index("<<<UNTRUSTED")
-        for s in ("DESC why we do it", "fix the cache key", "job unit (test)", "null check is missing"):
+        for s in ("DESC why we do it", "fix the cache key", "null check is missing"):
             self.assertIn(s, text)
             self.assertGreater(text.index(s), fence)  # all of it is data
         self.assertIn("Already raised", text)
@@ -322,7 +322,7 @@ class DiffTests(unittest.TestCase):
 
     def test_packet_without_optional_context_has_no_empty_sections(self):
         text, _ = wr.build_packet({"url": URL, "title": "T", "target": "develop"}, "", DIFF, wr.DEFAULTS)
-        for h in ("## Description", "## Commits", "## CI", "## Already raised", "## Sibling repos"):
+        for h in ("## Description", "## Commits", "## Already raised", "## Sibling repos"):
             self.assertNotIn(h, text)
 
     # --- gap 3: truncation keeps the risky files ---
@@ -1582,20 +1582,7 @@ class PacketContextTests(TempHome):
         def job_trace(self, project, job_id):
             return ("\x1b[31mERROR\x1b[0m token=glpat-SECRETSECRETSECRET1234\n" + "".join(f"line{i}\n" for i in range(50)))
 
-    def test_ci_summary_failed_job_tail_is_scrubbed(self):
-        mr = {"head_pipeline": {"id": 5, "sha": "d" * 40, "status": "failed"}}
-        s = wr.ci_summary(self.GL(), "group/m-seq", mr, "d" * 40)
-        self.assertIn("failed", s)
-        self.assertIn("unit (test)", s)
-        self.assertIn("line49", s)
-        self.assertNotIn("line10\n", s)  # only the tail
-        self.assertNotIn("SECRET", s)
-        self.assertNotIn("\x1b[", s)
 
-    def test_ci_summary_other_states(self):
-        self.assertIn("success", wr.ci_summary(self.GL(), "p", {"head_pipeline": {"id": 1, "sha": "a" * 40, "status": "success"}}, "a" * 40))
-        self.assertIn("no pipeline", wr.ci_summary(self.GL(), "p", {"head_pipeline": None}, "a" * 40))
-        self.assertIn("no pipeline", wr.ci_summary(self.GL(), "p", {"head_pipeline": {"id": 1, "sha": "b" * 40, "status": "failed"}}, "a" * 40))
 
     def test_already_raised_lists_open_threads_and_pending_drafts(self):
         drafts = [{"note": "pending agent draft\n\n🤖 _wiz-review · x_", "position": {"new_path": "b.py", "new_line": 4}}]
@@ -1616,7 +1603,7 @@ class PacketContextTests(TempHome):
 
     def test_optional_context_never_breaks_the_review(self):
         mr = {"description": "D", "head_pipeline": None}
-        ctx = wr.packet_context(self.GL(fail=True), "p", 1, mr, "/nonexistent/repo", "a" * 40, "a" * 40)
+        ctx = wr.packet_context(self.GL(fail=True), "p", 1, mr, "/nonexistent/repo", "a" * 40)
         self.assertEqual(ctx["description"], "D")
         self.assertNotIn("earlier", ctx)  # GitLab failed: just left out
         self.assertNotIn("commits", ctx)  # git failed: just left out

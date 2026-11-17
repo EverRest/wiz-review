@@ -683,8 +683,6 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review"):
         parts.append("## Description\n" + _untrusted(meta["description"]))
     if meta.get("commits"):
         parts.append("## Commits in the reviewed range\n" + _untrusted(meta["commits"]))
-    if meta.get("ci"):
-        parts.append("## CI (pipeline of the reviewed commit)\n" + _untrusted(meta["ci"]))
     if meta.get("earlier"):
         parts.append("## Already raised (open threads and pending drafts) — do not report these again"
                      + ("; in the summary, say which of them the new commits fix" if since else "")
@@ -1077,12 +1075,6 @@ class GitLab:
         payload = {"note": body, **({"position": position} if position else {})}
         return self._req("POST", self._mrp(project, iid) + "/draft_notes", body=payload)[0]
 
-    def pipeline_jobs(self, project, pipeline_id, scope):
-        return self._req("GET", f"/projects/{urllib.parse.quote(project, safe='')}/pipelines/{int(pipeline_id)}/jobs",
-                         {"scope[]": scope})[0]
-
-    def job_trace(self, project, job_id):
-        return self._req("GET", f"/projects/{urllib.parse.quote(project, safe='')}/jobs/{int(job_id)}/trace", text=True)[0]
 
     def add_label(self, project, iid, name):
         """add_labels keeps every other label on the MR."""
@@ -1528,29 +1520,11 @@ def _fetch(args, repo):
     return _git_out(args, repo, timeout=FETCH_TIMEOUT_SEC)
 
 
-ANSI_RE =re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-CI_TAIL, MAX_RAISED, MAX_COMMIT_LINES = 30, 30, 80
+MAX_RAISED, MAX_COMMIT_LINES = 30, 80
 
 
 def _flat(text, n=300):
     return " ".join((text or "").split())[:n]
-
-
-def ci_summary(gl, project, mr, head_sha):
-    """The pipeline of the reviewed commit; for a failure, the tail of up to two failed jobs (scrubbed)."""
-    p = mr.get("head_pipeline") or {}
-    if not p or p.get("sha") != head_sha:
-        return "no pipeline for this commit yet"
-    lines = [f"pipeline {p.get('status')}"]
-    if p.get("status") == "failed":
-        for j in gl.pipeline_jobs(project, p["id"], "failed")[:2]:
-            lines.append(f"failed job: {j.get('name')} ({j.get('stage')}), last lines of its log:")
-            try:
-                log = gl.job_trace(project, j["id"])
-            except (GitLabError, OSError, urllib.error.URLError):
-                continue
-            lines += ANSI_RE.sub("", log).replace("\r", "").splitlines()[-CI_TAIL:]
-    return scrub("\n".join(lines), [getattr(gl, "_token", None)])
 
 
 def already_raised(discussions, drafts):
@@ -1564,15 +1538,14 @@ def already_raised(discussions, drafts):
     return out[:MAX_RAISED]
 
 
-def packet_context(gl, project, iid, mr, repo, base, head_sha):
+def packet_context(gl, project, iid, mr, repo, base):
     """Extra, optional review context. Each piece is best effort: a failure leaves only that piece out."""
     ctx = {}
     if (mr.get("description") or "").strip():
         ctx["description"] = mr["description"].strip()[:4000]
     pieces = (("commits", lambda: "\n".join([ln[:200] for ln in _git_out(log_args(iid, base), repo).splitlines()
                                              if ln.strip()][:MAX_COMMIT_LINES])),
-              ("earlier", lambda: already_raised(gl.discussions(project, iid), gl.drafts(project, iid))),
-              ("ci", lambda: ci_summary(gl, project, mr, head_sha)))
+              ("earlier", lambda: already_raised(gl.discussions(project, iid), gl.drafts(project, iid))))
     for key, get in pieces:
         try:
             v = get()
@@ -1704,7 +1677,7 @@ def review_packet(gl, job, mr, refs, cfg, repo):
     req_ids = {m.note_id for m in parse_markers(all_notes) if m.kind == "request" and m.author == _user(mr["author"])}
     req = next((n["body"] for n in reversed(all_notes) if n.get("id") in req_ids), "")
     meta = {"url": job["url"], "title": mr.get("title", ""), "target": mr["target_branch"], "base": since or refs["base_sha"],
-            **packet_context(gl, project, iid, mr, repo, since or refs["base_sha"], refs["head_sha"])}
+            **packet_context(gl, project, iid, mr, repo, since or refs["base_sha"])}
     rctx = reviewer_context(project, repo, refs["base_sha"], full, cfg, job["kind"])
     try:  # repo-owned guides: read from the MR's BASE, so the MR itself cannot rewrite the guides that judge it
         guides = area_guides(repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
