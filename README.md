@@ -69,6 +69,7 @@ Other commands:
 | Command | What it does |
 |---|---|
 | `/wiz-review:review-now <MR url>` | Review any MR now, without an author request. |
+| `/wiz-review:review-with-me <MR url>` | Review an MR in your own session: Claude proposes findings, you approve them, then they become drafts. |
 | `/wiz-review:review-replies` | Show the reply threads of your MR. |
 | `/wiz-review:status` | Check that everything works. |
 | `/wiz-review rerun` (MR comment) | Review the new commits again. |
@@ -110,10 +111,10 @@ Lists and numbers take JSON, for example `config set exclude '["*.snap"]'`.
 | Command | What it does |
 |---|---|
 | `WR doctor` | Diagnostics: token, GitLab, `claude`, repos, schedule. |
-| `WR stats` | Reviews, errors, tokens, cost in USD, time, split by model. |
 | `WR tick --dry-run` | What the background run would do now. Writes nothing. |
 | `WR review --url <MR> [--model M] [--dry-run]` | Review one MR now. `--dry-run` prints the drafts instead of creating them. |
 | `WR suggest --target <branch>` | People who changed the same files recently. |
+| `WR threads --url <MR>` | List the open threads of an MR, used by `/wiz-review:review-replies`. |
 | `WR config set <key> <value>` | Change a setting (see above). |
 | `WR repos --root <folder>` | Set and rescan the clone folders. |
 | `WR schedule [--install \| --remove]` | Show, install, or remove the background run. |
@@ -132,7 +133,7 @@ Run `/wiz-review:status`. Each ❌ has a hint.
 | MR note "⚠️ wiz-review failed" | The note gives the cause. Details: `~/.wiz-review/logs/<project>__<MR>.log`. The plugin retries once. |
 | A review does something unexpected | `WR tick --dry-run` or `WR review --url <MR> --dry-run`. Neither writes to GitLab. |
 
-Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl`, `config.json`, `repos.json`, `token`, `state/`.
+Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl` (time and cost per review), `config.json`, `repos.json`, `token`, `state/`.
 
 ## Security and privacy
 
@@ -145,7 +146,7 @@ Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl`, `config.json`, 
 
 ## Cost
 
-Polling costs nothing. You pay only for reviews. On `haiku`, a change of about 15 lines costs roughly $0.003 and about 9 seconds. `WR stats` shows your real numbers.
+Polling costs nothing. You pay only for reviews. On `haiku`, a change of about 15 lines costs roughly $0.003 and about 9 seconds.
 
 ## For plugin developers
 

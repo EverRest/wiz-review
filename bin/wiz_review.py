@@ -444,61 +444,10 @@ def save_roots(roots):
     _atomic_write(p, json.dumps(cfg, indent=2))
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 TAG_RE = re.compile(r"\n\n🤖 _wiz-review · .*_\s*$")  # the attribution line agent_tag() appends
 
 
-
-
-
-
-
-
-
 HISTORY_COMMITS = 15  # your recent commits to the changed files that go into the packet
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def log_metric(rec):
@@ -506,45 +455,6 @@ def log_metric(rec):
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
         f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), **rec}, ensure_ascii=False) + "\n")
-
-
-
-
-
-
-def stats():
-    p = home() / "metrics.jsonl"
-    rows = [json.loads(x) for x in p.read_text().splitlines() if x.strip()] if p.exists() else []
-    by_model = {}
-    for r in rows:
-        m = by_model.setdefault(r.get("model") or "default", {"reviews": 0, "cost_usd": 0.0, "tokens_in": 0, "tokens_out": 0})
-        m["reviews"] += 1
-        m["cost_usd"] += r.get("cost_usd") or 0
-        m["tokens_in"] += r.get("tokens_in") or 0
-        m["tokens_out"] += r.get("tokens_out") or 0
-    durs = [r["duration_s"] for r in rows if r.get("duration_s") is not None]
-    usd = sum(r.get("cost_usd") or 0 for r in rows)
-    return {"reviews": len(rows), "errors": sum(1 for r in rows if r.get("error")),
-            "cost_usd": usd,
-            "tokens_in": sum(r.get("tokens_in") or 0 for r in rows), "tokens_out": sum(r.get("tokens_out") or 0 for r in rows),
-            "avg_duration_s": (sum(durs) / len(durs)) if durs else 0,
-            "findings": sum(r.get("findings") or 0 for r in rows), "by_model": by_model}
-
-
-def stats_text(st):
-    n = st["reviews"]
-    lines = [f"{n} review{'' if n == 1 else 's'}, {st['errors']} failed, {st['findings']} findings, avg {round(st['avg_duration_s'])} s",
-             f"tokens: {fmt_tokens(st['tokens_in'])} in / {fmt_tokens(st['tokens_out'])} out",
-             f"cost: ${fmt_money(st['cost_usd'])}"]
-    for name, m in sorted(st["by_model"].items()):
-        lines.append(f"  {name}: {m['reviews']} review{'' if m['reviews'] == 1 else 's'}, "
-                     f"{fmt_tokens(m['tokens_in'])} in / {fmt_tokens(m['tokens_out'])} out, "
-                     f"${fmt_money(m['cost_usd'])}")
-    return "\n".join(lines)
-
-
-
-
 
 
 # --- local checkouts -------------------------------------------------------------
@@ -765,8 +675,6 @@ SCHEMA = {
 }
 
 
-
-
 def _untrusted(text):
     """Wrap data in fences it cannot close itself."""
     text = text.replace("UNTRUSTED>>>", "UNTRUSTED>>]").replace("<<<UNTRUSTED", "[<<UNTRUSTED")
@@ -955,14 +863,6 @@ def _plain(body):
 
 
 AGENT_TOOL = "Claude Code"  # what runs the review; the tag names it so readers always know a machine wrote the text
-
-
-def fmt_tokens(n):
-    return str(n) if n < 1000 else f"{n / 1000:.1f}k" if n < 1_000_000 else f"{n / 1_000_000:.1f}M"
-
-
-def fmt_money(x):
-    return f"{x:.4f}" if x < 0.1 else f"{x:.2f}"
 
 
 def make_agent(model, meta, cfg):
@@ -1439,17 +1339,6 @@ def suggest_reviewers(repo, target):
     return {"files": files, "candidates": rank_authors(log, me)[:SUGGEST_TOP]}
 
 
-
-
-
-
-
-
-
-
-
-
-
 # --- tick: the whole protocol, zero LLM ---------------------------------------------
 
 def mr_info(raw):
@@ -1898,8 +1787,6 @@ def packet_context(gl, project, iid, mr, repo, base, head_sha):
     return ctx
 
 
-
-
 def diff_files(diff_text, extra):
     """[(path, changed_lines, renamed)] for the reviewable files of a diff, biggest change first."""
     out = []
@@ -1917,10 +1804,6 @@ def git_email(repo):
     except OSError:
         return ""
     return r.stdout.strip().lower() if r.returncode == 0 else ""
-
-
-
-
 
 
 def reviewer_context(project, repo, base, diff, cfg, kind):
@@ -2346,7 +2229,6 @@ def main(argv=None):
     g.add_argument("--install", action="store_true")
     g.add_argument("--remove", action="store_true")
     sub.add_parser("doctor")
-    sub.add_parser("stats")
     sub.add_parser("login")
     sub.add_parser("here")
     g = sub.add_parser("suggest")
@@ -2480,8 +2362,6 @@ def main(argv=None):
     elif a.cmd == "threads":
         project, iid = _parse_url(a.url)
         print(json.dumps(thread_summary(gitlab_from_env().discussions(project, iid)), ensure_ascii=False, indent=2))
-    elif a.cmd == "stats":
-        print(stats_text(stats()))
     return 0
 
 

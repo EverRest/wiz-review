@@ -616,9 +616,6 @@ class UsageTests(TempHome):
                                                       "cache_creation_input_tokens": 200}, total_cost_usd=0.01))
         self.assertEqual((meta["tokens_in"], meta["tokens_out"]), (305, 7))
 
-    def test_formatting(self):
-        self.assertEqual([wr.fmt_tokens(n) for n in (0, 999, 1500, 43270, 1234567)], ["0", "999", "1.5k", "43.3k", "1.2M"])
-        self.assertEqual([wr.fmt_money(x) for x in (0.0015, 0.0016, 0.12, 1.5, 12)], ["0.0015", "0.0016", "0.12", "1.50", "12.00"])
 
     def test_tag_names_tool_and_model_only(self):
         a = {"tool": "Claude Code", "model": "claude-haiku-5-5", "tokens_in": 43270, "tokens_out": 529, "cost_usd": 0.0016}
@@ -633,29 +630,8 @@ class UsageTests(TempHome):
         for d in gl.created:
             self.assertIn(TAG, d["note"])
 
-    def test_stats_report_tokens_and_cost(self):
-        wr.log_metric({"kind": "review", "project": "g/r", "iid": 1, "cost_usd": 1.0, "tokens_in": 1000, "tokens_out": 100,
-                       "duration_s": 10, "findings": 1, "model": "claude-haiku-5-5"})
-        wr.log_metric({"kind": "review", "project": "g/r", "iid": 2, "cost_usd": 0.5, "tokens_in": 500, "tokens_out": 50,
-                       "duration_s": 20, "findings": 0, "model": "claude-opus-5-5"})
-        st = wr.stats()
-        self.assertEqual((st["tokens_in"], st["tokens_out"]), (1500, 150))
-        self.assertAlmostEqual(st["cost_usd"], 1.5)
-        self.assertEqual(st["by_model"]["claude-opus-5-5"]["tokens_out"], 50)
-        self.assertAlmostEqual(st["by_model"]["claude-haiku-5-5"]["cost_usd"], 1.0)
 
 
-class StatsTextTests(TempHome):
-    def test_stats_text_is_readable(self):
-        wr.log_metric({"kind": "review", "project": "g/r", "iid": 1, "cost_usd": 0.0016, "tokens_in": 43002, "tokens_out": 529,
-                       "duration_s": 9, "findings": 2, "model": "claude-haiku-5-5"})
-        t = wr.stats_text(wr.stats())
-        for part in ("1 review", "43.0k in / 529 out", "$0.0016", "claude-haiku-5-5", "9 s"):
-            self.assertIn(part, t)
-
-    def test_stats_text_when_empty(self):
-        self.assertIn("0 reviews", wr.stats_text(wr.stats()))
-        self.assertNotIn("kept", wr.stats_text(wr.stats()))
 
     # --- gap 5: collect acceptance data in the pilot (no positive examples yet) ---
 
@@ -1275,16 +1251,6 @@ class FinishTests(TempHome):
         self.assertIn("INLINEBUG", gl.created[0]["note"])
 
 
-class StatsTests(TempHome):
-    def test_metrics_and_stats(self):
-        wr.log_metric({"kind": "review", "project": "g/r", "iid": 1, "cost_usd": 0.5, "duration_s": 100,
-                       "findings": 3, "model": "sonnet"})
-        wr.log_metric({"kind": "review", "project": "g/r", "iid": 2, "cost_usd": 1.5, "duration_s": 300,
-                       "findings": 1, "model": None, "error": "timeout"})
-        s = wr.stats()
-        self.assertEqual((s["reviews"], s["errors"]), (2, 1))
-        self.assertAlmostEqual(s["cost_usd"], 2.0)
-        self.assertEqual(s["avg_duration_s"], 200)
 
 
 class ModelAndConfigTypesTests(TempHome):
@@ -2042,7 +2008,6 @@ class ReviewerContextConfigTests(TempHome):
 
 
 
-# --- Model stats -----------------------------------------------
 
 
 

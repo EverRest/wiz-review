@@ -213,9 +213,6 @@ def main():
     fb = next((b for b in bodies(gl, key2) if b.startswith("🤖 **Авто-рев'ю")), "")
     check("fallback note names tool and model (no cost in MR text)", "🤖 _wiz-review · Claude Code · claude-" in fb.rstrip()[-140:]
           and "tokens" not in fb.rstrip()[-140:], fb[-160:])
-    rc, o = olena.wr("stats")
-    print("   author machine stats:\n   " + o.replace("\n", "\n   "))
-    check("stats shows tokens and USD cost", rc == 0 and "tokens:" in o and "$" in o and "€" not in o, o)
     print("   fallback:", fb[:200].replace("\n", " "))
 
     # 8. GitLab outage does not crash the tick
