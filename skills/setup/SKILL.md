@@ -32,12 +32,10 @@ Ask the user every question in the user's language.
    - Offer these commands:
      - `WR config set model sonnet|opus|<full id>`
      - `WR config set model inherit` (use the user's own Claude Code model)
-     - `WR config set model_small haiku` (a cheap model for small diffs when `model` is stronger)
      - `WR config set model default` (back to haiku)
    - Other settings use the same command form: `max_concurrent`, `interval_sec`, `notify true|false`, `exclude '["*.generated.md"]'`.
-   - **Reviewer memory** is off by default. Ask: "Should your reviews use a filtered digest of your own Claude notes for this project (`feedback` and `project` notes only, no emails or home paths)?" Only if the user says yes, run `WR config set use_memory true`. Tell them to look at `~/.claude/projects/<project>/memory` first.
-   - `autopublish_after_min` is 30 by default. Set it to `0` to turn off automatic publishing of the reviewer's untouched drafts. A reminder with sound comes 10 minutes before.
-   - Quiet hours are on by default: no autopublish from 20:00 to 08:00 and at the weekend, machine time. Tell the user this. To change it, the user edits `quiet_hours` in `~/.wiz-review/config.json`, for example `{"start": "21:00", "end": "09:00", "weekends": true}`, or `null` to turn it off.
+   - Reviews start as soon as the reviewer is picked. Drafts are never published automatically: the reviewer publishes them by hand. Tell the user this.
+   - To wait for CI before a review, the user runs `WR config set require_green_ci true`. It is off by default.
 4. **Install the background tick.**
    - On macOS, run `WR schedule` to print the launchd plist. After the user approves, run `WR schedule --install`.
    - On other systems, `WR schedule` prints a crontab line to add.

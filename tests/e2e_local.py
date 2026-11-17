@@ -80,9 +80,7 @@ class Machine:
         self.home = tmp / f"home-{name}"
         self.home.mkdir()
         (self.home / "config.json").write_text(json.dumps({"notify": False, "roots": [],
-                                                           "quiet_hours": None,
-                                                           "require_green_ci": False,  # fake has no pipelines
-                                                           "autopublish_after_min": 30}))  # opt-in; the scenario tests it; model: plugin default; any hour
+                                                           "require_green_ci": False}))  # fake has no pipelines; model: plugin default
         (self.home / "repos.json").write_text(json.dumps({PROJECT: str(clone)}))
         self.env = {**os.environ, "WIZ_REVIEW_HOME": str(self.home), "GITLAB_PERSONAL_ACCESS_TOKEN": token,
                     "WIZ_REVIEW_GITLAB_HOST": gl.host, "WIZ_REVIEW_GITLAB_SCHEME": "http", "WIZ_REVIEW_FAST": "1"}
@@ -174,14 +172,12 @@ def main():
     olena.wr("tick")
     check("author tick: no fallback while reviewer works", not has_marker(gl, key, "fallback"))
 
-    # 4. reviewer does nothing -> drafts auto-publish after the (scaled) 30 min
-    print("   waiting 65 s for the scaled autopublish timer…")
-    time.sleep(65)
+    # 4. the reviewer publishes the drafts by hand -> the next tick closes the round
+    for d in [d for d in gl.drafts.get(key, []) if d["author"] == "pavlo"]:
+        gl.drafts[key].remove(d)
+        gl.add_note(key, "pavlo", d["note"], d["position"])
     pavlo.wr("tick")
-    published = [n for n in gl.notes[key] if n["author"]["username"] == "pavlo" and not n["body"].startswith("<!--")
-                 and "рев'ю почато" not in n["body"] and "чернетки готові" not in n["body"]]
-    check("untouched drafts auto-published", len(published) >= 1 and not [d for d in gl.drafts.get(key, []) if d["author"] == "pavlo"])
-    check("done marker posted", has_marker(gl, key, "done"))
+    check("human publish closes the round with a done marker", has_marker(gl, key, "done"))
 
     # 5. author gets told, then threads are readable
     olena.wr("tick")
