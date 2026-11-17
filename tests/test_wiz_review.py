@@ -1792,14 +1792,6 @@ class WorktreeTests(TempHome):  # linked worktrees are checkouts too; the review
         after = (_git(str(w), "rev-parse", "HEAD"), _git(str(w), "symbolic-ref", "HEAD"), _git(str(w), "status", "--porcelain"))
         self.assertEqual(before, after)
 
-    def test_two_worktrees_never_share_the_precheck_ref(self):
-        c = self.clone(fetchable=True)
-        w1, w2 = self.worktree(c, "w1", "f1"), self.worktree(c, "w2", "f2")
-        for w in (w1, w2):
-            wr._fetch(wr.precheck_fetch_args("main"), str(w))
-        subprocess.run(["git", "update-ref", "-d", wr.PRECHECK_REF], cwd=w1, check=True)  # one precheck finishes first
-        self.assertEqual(_git(str(w2), "rev-parse", "--verify", wr.PRECHECK_REF), self.base)  # the other still has its ref
-        self.assertEqual(_git(str(c), "for-each-ref", "refs/worktree"), "")  # and the clone never sees it
 
 
 
@@ -1848,7 +1840,6 @@ class FetchTimeoutTests(unittest.TestCase):  # F: a hung fetch (VPN, credential 
         self.assertEqual(calls, [wr.FETCH_TIMEOUT_SEC])
         src = Path(wr.SCRIPT).read_text()
         self.assertNotIn("_git_out(fetch_args", src)  # every fetch goes through _fetch
-        self.assertNotIn("_git_out(precheck_fetch_args", src)
 
 
 class SuggestTests(unittest.TestCase):  # feature 4: reviewers who know the code
@@ -1887,44 +1878,6 @@ class SuggestTests(unittest.TestCase):  # feature 4: reviewers who know the code
         self.assertEqual([c["email"] for c in out["candidates"]], ["ivan@x.com"])  # Olena did not touch pay.py
 
 
-class PrecheckTests(TempHome):  # feature 8: a private review before the request
-    def test_precheck_tools_have_no_bash(self):
-        cmd = wr.review_cmd("precheck", None, wr.DEFAULTS)
-        self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,Grep,Glob")
-        self.assertNotIn("Bash", cmd[cmd.index("--allowedTools") + 1])
-        self.assertIn("--restricted", cmd)
-
-    def test_precheck_packet_needs_no_mr(self):
-        meta = {"url": None, "branch": "feature/x", "target": "develop", "title": "local change"}
-        text, st = wr.build_packet(meta, "", DIFF, wr.DEFAULTS, kind="precheck", untracked=["app/New.php"])
-        self.assertNotIn(" show --iid", text)
-        self.assertIn("feature/x", text)
-        self.assertIn("app/New.php", text)
-        self.assertGreater(text.index("app/New.php"), text.index("<<<UNTRUSTED"))
-        self.assertEqual(st["changed_lines"], 5)
-
-    def test_precheck_text_lists_findings_by_severity(self):
-        fs = {"summary": "Mostly fine.", "findings": [
-            finding(severity="minor", body="nit"), finding(severity="critical", line=12, body="BOOM"),
-            finding(confidence="low", body="guess")]}
-        t = wr.precheck_text(fs)
-        self.assertIn("Mostly fine.", t)
-        self.assertLess(t.index("BOOM"), t.index("nit"))
-        self.assertIn("app/Foo.php:12", t)
-        self.assertNotIn("guess", t)
-
-    def test_local_change_includes_uncommitted_and_lists_untracked(self):
-        with tempfile.TemporaryDirectory() as r:
-            _git(r, "init", "-q")
-            Path(r, "a.py").write_text("x\n")
-            _git(r, "add", ".")
-            _git(r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
-            _git(r, "update-ref", wr.PRECHECK_REF, "HEAD")
-            Path(r, "a.py").write_text("x\ny\n")  # not committed
-            Path(r, "new.py").write_text("z\n")  # not tracked
-            diff, untracked = wr.local_change(r)
-        self.assertIn("+y", diff)
-        self.assertEqual(untracked, ["new.py"])
 
 
 class PacketContextTests(TempHome):

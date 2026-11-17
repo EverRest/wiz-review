@@ -744,10 +744,6 @@ Return ONLY the JSON object required by the schema."""
 MR_TOOLS_RULE = """- The checkout is on another branch. To see the MR's version of a file run `{script} show --iid {iid} --path <file>`;
   for one file's diff run `{script} diff --iid {iid} --base {base} --path <file>`. Use Read/Grep/Glob on the
   checkout only for surrounding code. No other commands."""
-PRECHECK_TOOLS_RULE = ("- The checkout IS the version under review, uncommitted changes included. Use Read/Grep/Glob "
-                       "directly. No commands.")
-PRECHECK_MODE = ("- This is the author's private self-check before asking colleagues for a review. Nothing is posted. "
-                 "Be as strict as an independent reviewer would be.\n")
 
 FALLBACK_MODE = ("- No human reviewer was available: you are the fallback reviewer on the author's machine. "
                  "Be as strict as an independent reviewer would be.\n")
@@ -789,7 +785,7 @@ def risk_rank(path):
     return 1 if TEST_RE.search(p) else 0
 
 
-def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review", untracked=None):
+def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review"):
     """One self-contained prompt: instructions + intent + filtered diff. -> (text, stats)
     Optional `meta` context (description, commits, ci, earlier) is added only when present."""
     kept, skipped, omitted, used, changed = [], [], [], 0, 0
@@ -805,19 +801,11 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review", 
             continue
         used += n
         kept.append(text)
-    if kind == "precheck":  # local change, no MR yet: the checkout itself is what is reviewed
-        parts = [INSTRUCTIONS.format(subject="the author's own change", whose="author's", tools_rule=PRECHECK_TOOLS_RULE,
-                                     mode=PRECHECK_MODE),
-                 f"\n## Local change\nBranch: {meta['branch']} (target branch: {meta['target']}); no MR yet."]
-        if untracked:
-            parts.append("## New files not yet tracked by git (read them; not in the diff)\n"
-                         + _untrusted("\n".join(f"- {p}" for p in untracked)))
-    else:
-        iid = MR_URL_RE.match(meta["url"]).group(2)
-        rule = MR_TOOLS_RULE.format(script=SCRIPT, iid=iid, base=meta.get("base", "<base>"))
-        parts = [INSTRUCTIONS.format(subject="one GitLab merge request", whose="reviewer's", tools_rule=rule,
-                                     mode=FALLBACK_MODE if kind == "fallback" else ""),
-                 f"\n## Merge request\n{meta['url']}\nTarget branch: {meta['target']}"]
+    iid = MR_URL_RE.match(meta["url"]).group(2)
+    rule = MR_TOOLS_RULE.format(script=SCRIPT, iid=iid, base=meta.get("base", "<base>"))
+    parts = [INSTRUCTIONS.format(subject="one GitLab merge request", whose="reviewer's", tools_rule=rule,
+                                 mode=FALLBACK_MODE if kind == "fallback" else ""),
+             f"\n## Merge request\n{meta['url']}\nTarget branch: {meta['target']}"]
     parts.append(f"## Language\nWrite the body of each finding and the summary in {msg_for(cfg)['lang']}.")
     if since:
         parts.append(f"This is a re-review: only changes after commit {since} are shown. Do not repeat earlier findings.")
@@ -870,10 +858,8 @@ def review_cmd(kind, model, cfg):
     --restricted: ignores the user's settings/hooks/plugins (their broad allow-rules can't leak in, and it is
     ~10x cheaper), confines Read/Grep/Glob to the checkout; CLAUDE.md is still loaded (verified).
     --tools: only these tools exist; --allowedTools: Bash only for two read-only script commands."""
-    tools = ["Read", "Grep", "Glob"]
-    if kind != "precheck":  # precheck reviews the checkout itself: no MR refs to show or diff
-        tools += [f"Bash({SCRIPT} show:*)", f"Bash({SCRIPT} diff:*)"]
-    cmd = ["claude", "-p", "--restricted", "--tools", "Read,Grep,Glob" + (",Bash" if kind != "precheck" else ""),
+    tools = ["Read", "Grep", "Glob", f"Bash({SCRIPT} show:*)", f"Bash({SCRIPT} diff:*)"]
+    cmd = ["claude", "-p", "--restricted", "--tools", "Read,Grep,Glob,Bash",
            "--output-format", "json", "--json-schema", json.dumps(SCHEMA),
            "--strict-mcp-config", "--allowedTools", ",".join(tools)]
     if model:
@@ -1453,68 +1439,15 @@ def suggest_reviewers(repo, target):
     return {"files": files, "candidates": rank_authors(log, me)[:SUGGEST_TOP]}
 
 
-# --- feature 8: private self-check before the request (nothing goes to GitLab) ----------
-
-PRECHECK_REF = "refs/worktree/wiz-review/precheck-target"  # per-worktree: worktrees of one repo never share it
 
 
-def precheck_fetch_args(target):
-    return ["git", "fetch", "--no-tags", "origin", f"+refs/heads/{_check(BRANCH_RE, target, 'branch')}:{PRECHECK_REF}"]
 
 
-def local_change(repo, wide=False):
-    """The author's change against the fetched target: committed + uncommitted tracked files, and untracked names."""
-    base = _git_out(["git", "merge-base", "HEAD", PRECHECK_REF], repo).strip()
-    diff = _git_out(GIT_DIFF + (["--function-context"] if wide else []) + [_check(SHA_RE, base, "sha")], repo)
-    untracked = _git_out(["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"], repo)
-    return diff, [p for p in untracked.splitlines() if p.strip()]
 
 
-def precheck_text(findings):
-    fs = sorted((f for f in findings["findings"] if f["confidence"] != "low"), key=lambda f: SEV_ORDER[f["severity"]])
-    lines = [findings["summary"].strip(), ""]
-    for f in fs:
-        lines.append(f"- [{f['severity']}] {f['path']}:{f['line']} — {f['body']}")
-        if f.get("suggestion"):
-            lines.append(f"    suggestion: {f['suggestion']}")
-    if not fs:
-        lines.append("No findings.")
-    lines += ["", agent_tag(findings.get("agent")).replace("🤖 _", "").rstrip("_")]
-    return "\n".join(lines)
 
 
-def run_precheck(target, model=None, cwd="."):
-    if model is not None and not valid_model(model):
-        raise SystemExit(f"not a model name: {model!r}")
-    h, cfg = here(cwd), load_config()
-    repo, t0 = h["repo"], time.time()
-    _fetch(precheck_fetch_args(target), repo)
-    try:
-        diff, untracked = local_change(repo)
-        meta = {"url": None, "branch": h["branch"], "target": target, "title": "(local change)"}
-        for key, get in (("guides", lambda: area_guides(repo, None, [f[0] for f in diff_files(diff, cfg["exclude"])])),
-                         ("fixes", lambda: past_fixes(repo, _git_out(["git", "merge-base", "HEAD", PRECHECK_REF], repo).strip(),
-                                                      [f[0] for f in diff_files(diff, cfg["exclude"])])
-                          if cfg.get("fix_history", True) else [])):
-            try:
-                meta[key] = get()
-            except Exception as e:  # optional context never fails the check
-                print(f"{key} left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-        packet, pst = build_packet(meta, "", diff, cfg, kind="precheck", untracked=untracked)
-        if pst["changed_lines"] == 0 and not untracked:
-            return f"No changes against {target}."
-        if wide_diff(pst["changed_lines"], cfg):
-            packet, pst = build_packet(meta, "", local_change(repo, wide=True)[0], cfg, kind="precheck", untracked=untracked)
-        used = model or cfg.get("model")
-        proc = subprocess.run(review_cmd("precheck", used, cfg), input=packet, cwd=repo,
-                              capture_output=True, text=True, timeout=cfg["review_timeout_min"] * 60)
-        findings, meta_out = extract_findings(proc.stdout, repo)
-        findings["agent"] = make_agent(meta_out.get("model") or used or "your Claude Code model", meta_out, cfg)
-        log_metric({"kind": "precheck", "project": h["project"], "model": used, "diff_lines": pst["changed_lines"],
-                    "findings": len(findings["findings"]), "duration_s": round(time.time() - t0), **meta_out})
-        return precheck_text(findings)
-    finally:
-        subprocess.run(["git", "update-ref", "-d", PRECHECK_REF], cwd=repo, capture_output=True)
+
 
 
 # --- tick: the whole protocol, zero LLM ---------------------------------------------
@@ -2047,7 +1980,7 @@ GUIDE_DIR, GUIDE_MAX, GUIDE_CHARS = ".claude/review", 4, 8000
 def area_guides(repo, ref, files):
     """`.claude/review/*.md` of the reviewed repo: written by the people who own the code. An optional first line
     `paths: glob, glob` limits a guide to changes under those paths (fnmatch on the changed file names); no `paths:`
-    line = always. `ref`: the MR's base commit (an MR must not edit the guides that judge it); None = the working tree (precheck).
+    line = always. `ref`: the MR's base commit (an MR must not edit the guides that judge it); None = the working tree .
     -> ["### name\ntext"], at most GUIDE_MAX guides and GUIDE_CHARS characters."""
     if ref:
         names = sorted(n for n in _git_out(["git", "ls-tree", "--name-only", ref, "--", GUIDE_DIR + "/"], repo).splitlines()
@@ -2423,9 +2356,6 @@ def main(argv=None):
     g = sub.add_parser("publish-findings", help="review-with-me: approved findings become draft notes, never published")
     g.add_argument("--url", required=True)
     g.add_argument("--input", required=True, help="JSON file with summary + findings (the background review's schema)")
-    g = sub.add_parser("precheck")
-    g.add_argument("--target", required=True)
-    g.add_argument("--model", help="model for this check only")
     g = sub.add_parser("config")
     g.add_argument("action", choices=["set"])
     g.add_argument("key")
@@ -2526,8 +2456,6 @@ def main(argv=None):
         print(json.dumps(here()))
     elif a.cmd == "suggest":
         print(json.dumps(suggest_reviewers(here()["repo"], a.target), ensure_ascii=False, indent=2))
-    elif a.cmd == "precheck":
-        print(run_precheck(a.target, a.model))
     elif a.cmd == "login":
         import getpass
         tok = getpass.getpass("GitLab personal access token (scope api; input hidden): ").strip()

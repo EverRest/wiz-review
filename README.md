@@ -56,7 +56,7 @@ Author                          GitLab (MR)                       Reviewer
 /wiz-review:request-review @colleague
 ```
 
-Claude checks the branch, finds or creates the MR, sets the reviewers, and writes a request note with why the change exists, how you tested it, and questions for the reviewer. Optional: a private check first with `/wiz-review:precheck` (nothing goes to GitLab).
+Claude checks the branch, finds or creates the MR, sets the reviewers, and writes a request note with why the change exists, how you tested it, and questions for the reviewer. 
 
 After new commits, write `/wiz-review rerun` as a comment in the MR. Only the new commits are reviewed.
 
@@ -113,7 +113,6 @@ Lists and numbers take JSON, for example `config set exclude '["*.snap"]'`.
 | `WR stats` | Reviews, errors, tokens, cost in USD, time, split by model. |
 | `WR tick --dry-run` | What the background run would do now. Writes nothing. |
 | `WR review --url <MR> [--model M] [--dry-run]` | Review one MR now. `--dry-run` prints the drafts instead of creating them. |
-| `WR precheck --target <branch>` | A private review of your own uncommitted change. |
 | `WR suggest --target <branch>` | People who changed the same files recently. |
 | `WR config set <key> <value>` | Change a setting (see above). |
 | `WR repos --root <folder>` | Set and rescan the clone folders. |
