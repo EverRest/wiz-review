@@ -38,8 +38,6 @@ def data(notes, me="pavlo", author="olena", reviewers=("pavlo", "ivan"), local=N
 
 
 REQ = "<!-- wiz-review:request -->\nНавіщо..."
-# The CI gate is off by default; the tests of its waiting and red states turn it on explicitly.
-OPT_IN = {"require_green_ci": True}
 
 
 def rdata(notes, **kw):
@@ -175,49 +173,6 @@ class ReviewerTests(unittest.TestCase):
         self.assertIsNone(wr.next_due(data([note("olena", "01:00", REQ)])))
 
 
-class CiGateTests(unittest.TestCase):
-    def gate(self, status, notes=(), me="pavlo", **extra):
-        d = {**data([note("olena", "07:00", REQ), *notes], me=me), **extra}
-        return wr.ci_gate(d, me, "abc123", status)
-
-    def test_statuses(self):
-        for ok in ("success", "manual", "skipped", "canceled"):
-            self.assertEqual(self.gate(ok), "go", ok)
-        for pending in ("created", "pending", "running", "preparing", "waiting_for_resource", "scheduled", None):
-            self.assertEqual(self.gate(pending), "wait", pending)
-        self.assertEqual(self.gate("failed"), "red")
-
-    def test_switch_off(self):
-        for st in ("failed", "running", None):
-            self.assertEqual(self.gate(st, require_green_ci=False), "go")
-
-    def test_wait_bound_counts_from_my_marker_for_this_sha(self):
-        w = lambda at, sha="abc123", who="pavlo": note(who, at, f"<!-- wiz-review:ci-wait sha={sha} -->\nx")
-        self.assertEqual(self.gate("running", [w("09:31")]), "wait")  # 29 min
-        self.assertEqual(self.gate("running", [w("09:30")]), "go-late")  # 30 min
-        self.assertEqual(self.gate("running", [w("09:00", sha="e" * 7)]), "wait")  # another commit's wait
-        self.assertEqual(self.gate("running", [w("09:00", who="ivan")]), "wait")  # someone else's marker
-        self.assertEqual(self.gate("running", [w("09:00")], ci_wait_max_min=90), "wait")
-        self.assertEqual(self.gate(None, [w("09:00")]), "go-late")
-
-    def test_red_override_needs_a_rerun_after_my_red_note_from_the_author_or_a_reviewer(self):
-        red = note("pavlo", "09:00", "<!-- wiz-review:ci-red sha=abc123 -->\nred")
-        self.assertEqual(self.gate("failed", [red]), "red")
-        self.assertEqual(self.gate("failed", [red, note("olena", "09:30", "/wiz-review rerun")]), "go")
-        self.assertEqual(self.gate("failed", [red, note("ivan", "09:30", "/wiz-review rerun")]), "go")
-        self.assertEqual(self.gate("failed", [note("olena", "08:30", "/wiz-review rerun"), red]), "red")
-        self.assertEqual(self.gate("failed", [red, note("stranger", "09:30", "/wiz-review rerun")]), "red")
-        other = note("pavlo", "09:00", "<!-- wiz-review:ci-red sha=eeeeeee -->\nred")
-        self.assertEqual(self.gate("failed", [other, note("olena", "09:30", "/wiz-review rerun")]), "red")
-
-    def test_author_timer_treats_reviewers_ci_markers_as_pickup(self):
-        wait = lambda at: note("ivan", at, "<!-- wiz-review:ci-wait sha=abc123 -->\nx")
-        red = lambda at: note("ivan", at, "<!-- wiz-review:ci-red sha=abc123 -->\nx")
-        req = note("olena", "07:00", REQ)
-        run = lambda notes: wr.author_decide(data(notes, me="olena", reviewers=("pavlo", "ivan")))
-        self.assertIsNone(run([req, wait("09:40")]))
-        self.assertIsNone(run([req, red("07:10")]))  # red waits for a human, however long
-        self.assertEqual(run([req, wait("07:10")]), "fallback")  # a stale wait (> wait limit + stuck window) is nobody
 
 
 class AuthorTests(unittest.TestCase):
@@ -785,7 +740,7 @@ class TickTests(TempHome):
         self.key = ("group/m-seq", 142)
 
     def tick(self, now=NOW, **cfg):  # roots=[] by default: tests never scan the real ~/code
-        return wr.tick(self.gl, {**wr.DEFAULTS, **OPT_IN, "roots": [], **cfg}, now=wr.parse_time(now),
+        return wr.tick(self.gl, {**wr.DEFAULTS, "roots": [], **cfg}, now=wr.parse_time(now),
                        spawn=self.spawned.append,
                        notify=lambda m, sound=False: (self.notified.append(m), self.sounds.append(sound)))
 
@@ -957,40 +912,9 @@ class TickTests(TempHome):
     def _pipeline(self, status, sha="abc123"):
         self.gl.pipeline = {"id": 7, "sha": sha, "status": status} if status else None
 
-    def test_ci_running_waits_and_notes_once(self):
-        self._pipeline("running")
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick()
-        self.assertEqual(self.spawned, [])
-        self.assertEqual(len(self.gl.posted), 1)
-        self.assertTrue(self.gl.posted[0].startswith("<!-- wiz-review:ci-wait sha=abc123 -->"))
-        self.gl.rev = [raw_mr(updated="2026-11-13T09:05:00Z")]
-        self.tick()
-        self.assertEqual((len(self.gl.posted), self.spawned), (1, []))  # no second note, no review
 
-    def test_ci_wait_note_is_a_pickup_for_the_author_timer(self):
-        self._pipeline("running")
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick()
-        notes = self.gl.notes(*self.key)
-        self.assertIsNone(wr.author_decide(data(notes, me="olena", reviewers=("pavlo",))))
 
-    def test_no_pipeline_waits_too(self):
-        self._pipeline(None)
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick()
-        self.assertEqual(self.spawned, [])
-        self.assertIn("ci-wait", self.gl.posted[0])
 
-    def test_pipeline_of_another_commit_counts_as_none(self):
-        self._pipeline("success", sha="f" * 40)
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick()
-        self.assertEqual(self.spawned, [])
 
     def test_ci_success_reviews(self):
         self._pipeline("success")
@@ -1000,59 +924,10 @@ class TickTests(TempHome):
         self.assertEqual(len(self.spawned), 1)
         self.assertNotIn("CI ще не завершився", self.gl.posted[0])
 
-    def test_ci_wait_is_bounded_then_reviews_anyway(self):
-        self._pipeline("running")
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ),
-                                      note("pavlo", "09:20", "<!-- wiz-review:ci-wait sha=abc123 -->\nчекаю")]
-        self.tick()  # 40 min since the wait began, limit 30
-        self.assertEqual(len(self.spawned), 1)
-        self.assertTrue(self.gl.posted[0].startswith("<!-- wiz-review:picked-up"))
-        self.assertIn("CI ще не завершився або відсутній після 30 хв", self.gl.posted[0])
 
-    def test_ci_wait_limit_is_configurable(self):
-        self._pipeline("running")
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ),
-                                      note("pavlo", "09:20", "<!-- wiz-review:ci-wait sha=abc123 -->\nчекаю")]
-        self.tick(ci_wait_max_min=60)
-        self.assertEqual(self.spawned, [])
 
-    def test_ci_red_blocks_with_one_note_and_rerun_overrides(self):
-        self._pipeline("failed")
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick()
-        self.assertEqual(self.spawned, [])
-        self.assertEqual(len(self.gl.posted), 1)
-        self.assertTrue(self.gl.posted[0].startswith("<!-- wiz-review:ci-red sha=abc123 -->"))
-        self.assertIn("/wiz-review rerun", self.gl.posted[0])
-        self.gl.rev = [raw_mr(updated="2026-11-13T09:05:00Z")]
-        self.tick()
-        self.assertEqual((len(self.gl.posted), self.spawned), (1, []))
-        # the author writes the rerun command after the red note: the review goes ahead on the same sha
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ),
-                                      note("pavlo", "09:00", "<!-- wiz-review:ci-red sha=abc123 -->\nred"),
-                                      note("olena", "09:30", "/wiz-review rerun")]
-        self.gl.rev = [raw_mr(updated="2026-11-13T09:31:00Z")]
-        self.tick()
-        self.assertEqual(len(self.spawned), 1)
 
-    def test_ci_red_then_green_on_same_commit_reviews(self):
-        self._pipeline("success")  # retried job went green; the old red note is for the same sha
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ),
-                                      note("pavlo", "09:00", "<!-- wiz-review:ci-red sha=abc123 -->\nred")]
-        self.tick()
-        self.assertEqual(len(self.spawned), 1)
 
-    def test_gate_off_restores_old_behaviour(self):
-        self._pipeline("failed")
-        self.gl.mr = lambda p, i: self.fail("the pipeline must not even be looked up")
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick(require_green_ci=False)
-        self.assertEqual(len(self.spawned), 1)
 
     def test_skipped_round_is_not_retried_and_a_rerun_still_works(self):  # size skip: no retry loop
         self.gl.rev = [raw_mr()]
@@ -1076,14 +951,6 @@ class TickTests(TempHome):
         self.tick(now="2026-11-13T12:00:00Z")
         self.assertEqual([j["kind"] for j in self.spawned], ["fallback"])
 
-    def test_the_team_file_on_the_default_branch_cannot_switch_the_ci_gate_off(self):
-        self.gl.team_file = '{"require_green_ci": false}'
-        self._pipeline("failed")
-        self.gl.rev = [raw_mr()]
-        self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
-        self.tick()  # the machine says the gate is on; a repo file can only make it stricter, so no review on red CI
-        self.assertEqual(self.spawned, [])
-        self.assertEqual(self.gl.repo_file_refs, [(wr.TEAM_FILE, "d" * 40)])  # the default branch, not the MR
 
     def test_retry_is_not_gated(self):
         self._pipeline("failed")
@@ -1092,38 +959,8 @@ class TickTests(TempHome):
         self.tick()  # picked up 60 min ago, no result: retry runs although CI is red now
         self.assertEqual(self.spawned[0]["kind"], "review")
 
-    def test_author_fallback_waits_for_ci(self):
-        self.gl = FakeGL(me="olena")
-        self._pipeline("running")
-        self.gl.auth = [raw_mr(reviewers=[])]
-        self.gl.notes_by[self.key] = [note("olena", "09:59", REQ)]
-        self.tick()
-        self.assertEqual(self.spawned, [])
-        self.assertTrue(self.gl.posted[0].startswith("<!-- wiz-review:ci-wait sha=abc123 -->"))
 
-    def test_author_fallback_never_reviews_red_without_rerun(self):
-        self.gl = FakeGL(me="olena")
-        self._pipeline("failed")
-        self.gl.auth = [raw_mr(reviewers=[])]
-        self.gl.notes_by[self.key] = [note("olena", "09:59", REQ)]
-        self.tick()
-        self.assertEqual(self.spawned, [])
-        self.assertTrue(self.gl.posted[0].startswith("<!-- wiz-review:ci-red sha=abc123 -->"))
-        self.gl.notes_by[self.key] = [note("olena", "09:00", REQ),
-                                      note("olena", "09:10", "<!-- wiz-review:ci-red sha=abc123 -->\nred"),
-                                      note("olena", "09:20", "/wiz-review rerun")]
-        self.gl.auth = [raw_mr(reviewers=[], updated="2026-11-13T09:21:00Z")]
-        self.tick()
-        self.assertEqual(self.spawned[0]["kind"], "fallback")
 
-    def test_author_fallback_after_bounded_wait(self):
-        self.gl = FakeGL(me="olena")
-        self._pipeline("running")
-        self.gl.auth = [raw_mr(reviewers=[])]
-        self.gl.notes_by[self.key] = [note("olena", "08:00", REQ),
-                                      note("olena", "09:00", "<!-- wiz-review:ci-wait sha=abc123 -->\nчекаю")]
-        self.tick()
-        self.assertEqual(self.spawned[0]["kind"], "fallback")
 
     def test_one_bad_mr_does_not_stop_others(self):  # I2
         bad = {**raw_mr(), "iid": 999, "web_url": "https://elsewhere.example/x/-/merge_requests/999"}
@@ -1282,14 +1119,6 @@ class ModelAndConfigTypesTests(TempHome):
                 with self.assertRaises(SystemExit):
                     wr.parse_config_value("model", bad)
 
-    def test_ci_gate_config(self):
-        self.assertFalse(wr.DEFAULTS["require_green_ci"])
-        self.assertEqual(wr.DEFAULTS["ci_wait_max_min"], 30)
-        self.assertIs(wr.parse_config_value("require_green_ci", "false"), False)
-        self.assertEqual(wr.parse_config_value("ci_wait_max_min", "45"), 45)
-        for key, bad in (("require_green_ci", "maybe"), ("ci_wait_max_min", "0"), ("ci_wait_max_min", "x")):
-            with self.assertRaises(SystemExit):
-                wr.parse_config_value(key, bad)
 
 
 
@@ -1499,21 +1328,6 @@ class RequestFlowTests(TempHome):
         self.assertEqual(out, [{"id": "a", "path": "app/Foo.php", "line": 11, "author": "pavlo",
                                 "body": "use bcmath", "replies": 1}])
 
-    def test_reply_thread_resolves_and_blocks_secrets(self):
-        calls = []
-
-        class G:
-            _token = "tok-123456789"
-
-            def reply(self, project, iid, disc, body):
-                calls.append(("reply", disc, body))
-
-            def resolve(self, project, iid, disc, resolved=True):
-                calls.append(("resolve", disc, resolved))
-        wr.reply_thread(G(), {"url": URL, "discussion": "a", "body": "fixed", "resolve": True})
-        self.assertEqual(calls, [("reply", "a", "fixed"), ("resolve", "a", True)])
-        with self.assertRaises(wr.SecretLeak):
-            wr.reply_thread(G(), {"url": URL, "discussion": "a", "body": "my tok-123456789"})
 
     def test_client_endpoints(self):
         seen = []
@@ -1585,69 +1399,6 @@ def _as(name, email):
 
 
 
-class DryRunTests(TempHome):  # C: a safe pilot on the real GitLab
-    def test_reads_pass_through_and_writes_are_only_recorded(self):
-        inner = FakeGL()
-        inner.notes_by[("group/m-seq", 142)] = [note("olena", "07:00", REQ)]
-        gl = wr.DryRunGitLab(inner)
-        self.assertEqual(len(gl.notes("group/m-seq", 142)), 1)
-        gl.post_note("group/m-seq", 142, "hello")
-        d = gl.create_draft("group/m-seq", 142, "draft body", {"new_path": "a.py", "new_line": 3})
-        gl.publish_draft("group/m-seq", 142, d["id"])
-        self.assertEqual((inner.posted, inner.created, inner.published), ([], [], []))  # nothing reached GitLab
-        self.assertEqual([w["call"] for w in gl.writes], ["post_note", "create_draft", "publish_draft"])
-        self.assertEqual(gl.username(), "pavlo")
-
-    def test_dry_home_is_a_throwaway_copy(self):
-        (self.home / "config.json").write_text('{"model": "sonnet"}')
-        with wr.dry_home() as d:
-            self.assertNotEqual(wr.home(), self.home)
-            self.assertEqual(wr.load_config()["model"], "sonnet")  # real settings are read
-            wr.save_state("group/m-seq", 142, {"x": 1})
-            wr.log_metric({"kind": "review"})
-        self.assertEqual(wr.home(), self.home)  # restored
-        self.assertFalse((self.home / "state").exists())  # the real state did not change
-        self.assertFalse((self.home / "metrics.jsonl").exists())
-        self.assertFalse(Path(d).exists())
-
-    def test_dry_tick_reports_decisions_without_acting(self):
-        inner = FakeGL()
-        inner.rev = [raw_mr()]
-        inner.notes_by[("group/m-seq", 142)] = [note("olena", "07:00", REQ)]
-        clone = tempfile.TemporaryDirectory()
-        self.addCleanup(clone.cleanup)
-        (self.home / "repos.json").write_text(json.dumps({"group/m-seq": clone.name}))
-        report = wr.dry_tick(inner, {**wr.DEFAULTS, "roots": []})
-        self.assertEqual(inner.posted, [])
-        self.assertIn("picked-up", report)
-        self.assertIn("would start a review job: group/m-seq!142", report)
-        self.assertFalse((self.home / "state").exists())
-
-    def test_dry_review_prints_the_drafts_with_positions(self):
-        inner = FakeGL()
-        inner.notes_by[("group/m-seq", 142)] = [note("olena", "07:00", REQ)]
-        clone = tempfile.TemporaryDirectory()
-        self.addCleanup(clone.cleanup)
-        (self.home / "repos.json").write_text(json.dumps({"group/m-seq": clone.name}))
-
-        def fake_run(job, gl, cfg):  # stands in for git + claude: the real finish_job does the writing
-            wr.finish_job(gl, job, {"summary": "s", "findings": [finding()]}, wr.parse_diff(DIFF), REFS, cfg,
-                          notify=lambda m, sound=False: None)
-            return 0
-        report = wr.dry_review(inner, URL, run=fake_run)
-        self.assertEqual((inner.posted, inner.created), ([], []))
-        self.assertIn("DRAFT app/Foo.php:11", report)
-        self.assertIn("drafts-ready", report)
-
-    def test_cli_flags_exist(self):
-        orig = wr.gitlab_from_env
-        wr.gitlab_from_env = lambda: (_ for _ in ()).throw(wr.GitLabError("GET /user: 503"))
-        try:
-            self.assertEqual(wr.main(["tick", "--dry-run"]), 2)
-            with self.assertRaises(wr.GitLabError):
-                wr.main(["review", "--url", URL, "--dry-run"])
-        finally:
-            wr.gitlab_from_env = orig
 
 
 class LauncherTests(TempHome):  # D: `/plugin update` must not silently stop the tick

@@ -79,8 +79,7 @@ class Machine:
         self.name, self.clone = name, clone
         self.home = tmp / f"home-{name}"
         self.home.mkdir()
-        (self.home / "config.json").write_text(json.dumps({"notify": False, "roots": [],
-                                                           "require_green_ci": False}))  # fake has no pipelines; model: plugin default
+        (self.home / "config.json").write_text(json.dumps({"notify": False, "roots": []}))  # model: plugin default
         (self.home / "repos.json").write_text(json.dumps({PROJECT: str(clone)}))
         self.env = {**os.environ, "WIZ_REVIEW_HOME": str(self.home), "GITLAB_PERSONAL_ACCESS_TOKEN": token,
                     "WIZ_REVIEW_GITLAB_HOST": gl.host, "WIZ_REVIEW_GITLAB_SCHEME": "http", "WIZ_REVIEW_FAST": "1"}
@@ -179,19 +178,10 @@ def main():
     pavlo.wr("tick")
     check("human publish closes the round with a done marker", has_marker(gl, key, "done"))
 
-    # 5. author gets told, then threads are readable
+    # 5. author gets told
     olena.wr("tick")
     st = [json.loads(p.read_text()) for p in (olena.home / "state").glob("*.json") if "snapshot" not in p.name]
     check("author notified once about done", any(s.get("notified") for s in st), str(st))
-    rc, o = olena.wr("threads", "--url", url)
-    threads = json.loads(o) if rc == 0 else []
-    check("author sees review threads", rc == 0 and len(threads) >= 1, o)
-    if threads:
-        rc, o = olena.wr("reply", "--input", olena.json_file("reply.json", {
-            "url": url, "discussion": threads[0]["id"], "body": "good catch, fixing", "resolve": True}))
-        check("author reply + resolve", rc == 0 and gl.notes[key][-1]["body"] == "good catch, fixing", o)
-        rc, o = olena.wr("threads", "--url", url)
-        check("resolved thread disappears", rc == 0 and all(t["id"] != threads[0]["id"] for t in json.loads(o)))
 
     # 6. rerun without new commits answers without spending Claude
     spent = len(pavlo.metrics())

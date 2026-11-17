@@ -7,7 +7,6 @@ only for the review itself (`claude -p`, packet on stdin, findings back as JSON)
 Stdlib only.
 """
 import argparse
-import contextlib
 import difflib
 import fnmatch
 import hashlib
@@ -17,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -38,11 +36,6 @@ PICKUP_TIMEOUT = 30      # author: nobody picked up -> fallback
 RETRY_AFTER = 30         # reviewer: picked-up without result -> retry once per round
 STUCK_AFTER = 60         # author: picked-up without result counts as nobody
 NO_CHECKOUT_RETRY = 5    # no local clone yet: rescan `roots` again after this
-CI_POLL = 2              # waiting for CI: look again after this many minutes (an MR's updated_at may not move)
-CI_RED_POLL = 10         # CI red: a human has to act; look again less often
-CI_WAIT_MAX = 30         # default of `ci_wait_max_min`: review anyway after waiting this long for CI
-CI_PENDING = {"created", "pending", "running", "preparing", "waiting_for_resource", "scheduled",
-              "waiting_for_callback"}
 
 DEFAULTS = {
     "roots": ["~/code"],        # where local clones live
@@ -55,8 +48,6 @@ DEFAULTS = {
     "small_diff_lines": 60,     # diffs up to this many changed lines get whole functions as context
     "max_diff_lines": 3000,     # diff lines embedded in the packet; the rest is read on demand
     "max_inline": 20,           # inline drafts per review; overflow goes to the summary
-    "require_green_ci": False,  # on: review only once the head commit's pipeline is not running / not red (see ci_gate)
-    "ci_wait_max_min": 30,      # waiting for a pipeline that is running or missing: review anyway after this long
     "notify": True,             # local desktop notification
     "exclude": [],              # extra glob patterns of files not worth reviewing
     "comment_language": "uk",   # uk | en: the plugin's own note texts and the language the model writes findings in
@@ -189,10 +180,6 @@ def author_decide(data):
     def progressing(r):
         if _last(ms, r, {"drafts-ready", "done", "skipped"}, after=req.at):  # skipped: a human must ask for a review
             return True
-        gate = _last(ms, r, {"ci-wait", "ci-red"}, after=req.at)  # the reviewer is waiting for CI: that is a pickup
-        if gate and (gate.kind == "ci-red"  # red: waits for a human fix or a rerun, the fallback obeys the same gate
-                     or now - gate.at < minutes(data.get("ci_wait_max_min", CI_WAIT_MAX) + STUCK_AFTER)):
-            return True
         pick = _last(ms, r, {"picked-up"}, after=req.at)
         fails = [m for m in ms if m.author == r and m.kind == "failed" and m.at > req.at]
         if len(fails) >= 2 and pick is not None and fails[-1].at > pick.at:
@@ -207,36 +194,12 @@ def _mark(ms, me, kind, sha):
     return hits[-1] if hits else None
 
 
-def ci_gate(data, me, sha, status):
-    """The CI gate in front of a review (reviewer's, or the author's fallback). status: pipeline status of the head
-    commit `sha`, None = no pipeline for it. -> "go" | "go-late" | "wait" | "red".
-    wait: pipeline missing/running (bounded by `ci_wait_max_min` from my `ci-wait` marker for this sha);
-    red: failed, until a `/wiz-review rerun` newer than my `ci-red` marker for this sha."""
-    if not data.get("require_green_ci", True):
-        return "go"
-    ms = parse_markers(data["notes"])
-    if status == "failed":
-        author, reviewers = _mr(data)
-        red = _mark(ms, me, "ci-red", sha)
-        if red and any(m.kind == "rerun" and m.at > red.at and m.author in {author, *reviewers} for m in ms):
-            return "go"
-        return "red"
-    if status is None or status in CI_PENDING:
-        w = _mark(ms, me, "ci-wait", sha)
-        if w and _now(data) - w.at >= minutes(data.get("ci_wait_max_min", CI_WAIT_MAX)):
-            return "go-late"
-        return "wait"
-    return "go"  # success, and manual/skipped/canceled: no signal that the code is broken
-
-
 def next_due(data):
     """Earliest future moment a timer could fire; lets the tick skip unchanged MRs until then."""
     now = _now(data)
     cands = []
     for m in parse_markers(data["notes"]):
         cands += [m.at + minutes(t) for t in (PICKUP_TIMEOUT, RETRY_AFTER, STUCK_AFTER)]
-        if m.kind == "ci-wait":
-            cands += [m.at + minutes(t + data.get("ci_wait_max_min", CI_WAIT_MAX)) for t in (0, STUCK_AFTER)]
     future = [c for c in cands if c > now]
     return min(future) if future else None
 
@@ -279,7 +242,7 @@ def load_config():
 
 MODEL_RE = re.compile(r"^(?!-)[A-Za-z0-9][A-Za-z0-9._\[\]-]*$")  # alias (sonnet, opus…) or full id; never a flag
 INT_MIN = {"interval_sec": 30, "max_concurrent": 1, "review_timeout_min": 1, "small_diff_lines": 0,
-           "max_diff_lines": 1, "max_inline": 0, "history_in_packet": 0, "ci_wait_max_min": 1}
+           "max_diff_lines": 1, "max_inline": 0, "history_in_packet": 0}
 
 
 _UNSET = object()
@@ -313,7 +276,7 @@ def parse_config_value(key, raw):
         if v < INT_MIN[key]:
             raise SystemExit(f"{key} must be at least {INT_MIN[key]}")
         return v
-    if key in ("notify", "require_green_ci", "fix_history"):
+    if key in ("notify", "fix_history"):
         if raw.lower() not in ("true", "false"):
             raise SystemExit(f"{key} must be true or false")
         return raw.lower() == "true"
@@ -330,7 +293,7 @@ def parse_config_value(key, raw):
 
 TEAM_FILE = ".claude/wiz-review.json"  # in the reviewed repo; read from the default branch head, never the MR or its target
 TEAM_KEYS = ("model", "small_diff_lines", "max_inline", "exclude",
-             "require_green_ci", "ci_wait_max_min", "comment_language", "rules_always")
+             "comment_language", "rules_always")
 # everything else (roots, tokens, rules_never...) stays per machine.
 # rules_never is not here: a repo file must not be able to hide findings. The keys below can only make the machine stricter.
 TEAM_MAX_BYTES, RULE_ITEMS, RULE_CHARS, RULE_ITEM_CHARS = 65536, 20, 2000, 200
@@ -392,13 +355,11 @@ def team_head(gl, project):
 
 def apply_team(cfg, team):
     """defaults < machine config.json < the repo's team file. The repo can add to the machine's rules, never remove them:
-    exclude is a union, require_green_ci only turns on."""
-    out = {**cfg, **{k: v for k, v in team.items() if k in ("model", "small_diff_lines", "max_inline", "ci_wait_max_min",
+    exclude is a union."""
+    out = {**cfg, **{k: v for k, v in team.items() if k in ("model", "small_diff_lines", "max_inline",
                                                             "comment_language", "rules_always")}}
     if "exclude" in team:
         out["exclude"] = sorted(set(cfg.get("exclude") or []) | set(team["exclude"]))
-    if "require_green_ci" in team:
-        out["require_green_ci"] = bool(cfg.get("require_green_ci")) or bool(team["require_green_ci"])
     return out
 
 
@@ -1275,15 +1236,6 @@ def thread_summary(discussions):
     return out
 
 
-def reply_thread(gl, args):
-    project, iid = _parse_url(args["url"])
-    if find_secrets(args["body"], [getattr(gl, "_token", None)]):
-        raise SecretLeak("the reply contains something that looks like a secret")
-    gl.reply(project, iid, args["discussion"], args["body"])
-    if args.get("resolve"):
-        gl.resolve(project, iid, args["discussion"], True)
-
-
 def here(cwd="."):
     """Project path and branch of the git repo in cwd (what the author's skill needs to find its MR)."""
     def git(*a):
@@ -1298,15 +1250,6 @@ def here(cwd="."):
 
 
 # --- feature 4: reviewers who know the code (local git only, zero tokens) ---------------
-
-
-
-
-
-
-
-
-
 
 
 # --- tick: the whole protocol, zero LLM ---------------------------------------------
@@ -1353,35 +1296,6 @@ def _pickup(gl, info, me, how="", extra="", cfg=None):
                  f"<!-- wiz-review:picked-up sha={info['sha']} -->\n🔍 @{me}: {msg_for(cfg)['pickup']}{who}" + (f"\n{extra}" if extra else ""))
 
 
-def ci_status(gl, project, iid, sha):
-    """Status of the pipeline of exactly this commit; None when GitLab has none for it (yet)."""
-    p = gl.mr(project, iid).get("head_pipeline") or {}
-    return p.get("status") if p.get("sha") == sha else None
-
-
-def ci_hold(gl, cfg, ctx, info, notes, st, data, me):
-    """Apply the CI gate. -> (None, extra_text) to go on with the review, or (result, None) to stop for now."""
-    sha = info["sha"]
-    gate = ci_gate(data, me, sha, ci_status(gl, info["project"], info["iid"], sha) if cfg["require_green_ci"] else "success")
-    if gate == "go":
-        return None, ""
-    if gate == "go-late":
-        return None, f"⏱ CI ще не завершився або відсутній після {cfg['ci_wait_max_min']} хв — рев'ю попри це."
-    ms = parse_markers(notes)
-    short = sha[:7]
-    if gate == "red":
-        if not _mark(ms, me, "ci-red", sha):
-            gl.post_note(info["project"], info["iid"], f"<!-- wiz-review:ci-red sha={sha} -->\n🔴 @{me}: CI червоний на {short} — "
-                         "виправте pipeline і запуште, або напишіть `/wiz-review rerun`, щоб рев'ю відбулося попри це.")
-        st["_due"] = (ctx["now"] + minutes(CI_RED_POLL)).isoformat()
-        return "ci-red", None
-    if not _mark(ms, me, "ci-wait", sha):
-        gl.post_note(info["project"], info["iid"], f"<!-- wiz-review:ci-wait sha={sha} -->\n⏳ @{me}: чекаю на CI для {short} "
-                     f"(до {cfg['ci_wait_max_min']} хв), потім рев'ю.")
-    st["_due"] = (ctx["now"] + minutes(CI_POLL)).isoformat()
-    return "ci-wait", None
-
-
 def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
     me, project, iid = ctx["me"], info["project"], info["iid"]
     action = reviewer_decide(data)
@@ -1408,15 +1322,10 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
             _pickup(gl, info, me, cfg=cfg)
             gl.post_note(project, iid, f"<!-- wiz-review:done sha={since} -->\n✅ @{me}: нових комітів немає — рев'ю актуальне.")
             return "rerun-noop"
-        extra = ""
-        if action != "retry":  # a retry is a review that already started: the gate was passed
-            hold, extra = ci_hold(gl, cfg, ctx, info, notes, st, data, me)
-            if hold:
-                return hold
         if ctx["running"] >= cfg["max_concurrent"]:
             st["_deferred"] = True
             return "deferred"
-        _pickup(gl, info, me, models_summary(cfg), extra, cfg)
+        _pickup(gl, info, me, models_summary(cfg), cfg=cfg)
         ctx["spawn"]({"kind": "review", "project": project, "iid": iid, "url": info["url"], "repo": repo,
                       "since": since, "sha": info["sha"], "target": info["target"], "title": info["title"]})
         ctx["running"] += 1
@@ -1438,9 +1347,6 @@ def _author_step(gl, cfg, ctx, info, notes, st, data):
     if not repo:
         st["_due"] = (ctx["now"] + minutes(NO_CHECKOUT_RETRY)).isoformat()
         return "no-checkout"
-    hold, _ = ci_hold(gl, cfg, ctx, info, notes, st, data, me)  # same gate as the reviewer's review
-    if hold:
-        return hold
     if ctx["running"] >= cfg["max_concurrent"]:
         st["_deferred"] = True
         return "deferred"
@@ -1486,7 +1392,6 @@ def _tick_one(gl, cfg, ctx, role, step, raw, now):
             _warn_once(f"team settings not read for {info['project']}: {type(e).__name__}")
     tcfg = apply_team(cfg, st.get("team") or {})
     data = {"now": now.isoformat(), "me": ctx["me"], "notes": notes, "local": st,
-            "require_green_ci": tcfg["require_green_ci"], "ci_wait_max_min": tcfg["ci_wait_max_min"],
             "mr": {"author": info["author"], "reviewers": info["reviewers"], "draft": info["draft"]}}
     result = step(gl, tcfg, ctx, info, notes, st, data)
     nd = next_due(data)
@@ -1602,84 +1507,6 @@ def manual_review(gl, url, spawn=None, model=None):
         job["model"] = model
     spawn(job)
     return job
-
-
-# --- dry run: the real decisions and the real review, nothing written ----------------------
-
-class DryRunGitLab:
-    """Reads go to GitLab; every write is only recorded. The protocol code runs unchanged on top of it."""
-    WRITES = {"post_note", "create_mr", "set_reviewers", "reply", "resolve", "create_todo",
-              "create_draft", "publish_draft", "delete_draft", "add_label"}
-
-    def __init__(self, gl):
-        self._gl, self.writes, self._next = gl, [], 900_000_000
-
-    def __getattr__(self, name):  # only called for names this wrapper does not define
-        if name in DryRunGitLab.WRITES:
-            return lambda *args, **kw: self._record(name, args, kw)
-        return getattr(self._gl, name)
-
-    def _record(self, name, args, kw):
-        self.writes.append({"call": name, "args": args, **kw})
-        if name == "create_draft":
-            self._next += 1
-            position = kw.get("position", args[3] if len(args) > 3 else None)
-            return {"id": self._next, "note": args[2], "position": position}
-        return None
-
-
-@contextlib.contextmanager
-def dry_home():
-    """A throwaway copy of ~/.wiz-review: real settings, token and state are read; nothing real changes."""
-    real, old = home(), os.environ.get("WIZ_REVIEW_HOME")
-    with tempfile.TemporaryDirectory(prefix="wiz-review-dry-") as d:  # mode 0700: the token copy stays private
-        if real.exists():
-            shutil.copytree(real, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns("logs", "run", "tmp", "bin", "*.lock"))
-        os.environ["WIZ_REVIEW_HOME"] = d
-        try:
-            yield Path(d)
-        finally:
-            if old is None:
-                os.environ.pop("WIZ_REVIEW_HOME", None)
-            else:
-                os.environ["WIZ_REVIEW_HOME"] = old
-
-
-def dry_report(writes):
-    def body(text):
-        return "\n".join("    " + ln for ln in (text or "").splitlines())
-    out = []
-    for w in writes:
-        a = w["args"]
-        where = f"{a[0]}!{a[1]}" if len(a) > 1 else ""
-        if w["call"] == "post_note":
-            out.append(f"NOTE {where}\n{body(a[2])}")
-        elif w["call"] == "create_draft":
-            pos = w.get("position", a[3] if len(a) > 3 else None)
-            at = f"{pos.get('new_path')}:{pos.get('new_line')}" if pos else "general (summary)"
-            out.append(f"DRAFT {at} on {where}\n{body(a[2])}")
-        else:
-            out.append(f"{w['call'].upper()} {where} {' '.join(str(x) for x in a[2:])}".rstrip())
-    return "\n\n".join(out) if out else "nothing would be written to GitLab"
-
-
-def dry_tick(gl, cfg):
-    with dry_home():
-        dry, spawned, notes = DryRunGitLab(gl), [], []
-        log = tick(dry, cfg, spawn=spawned.append, notify=lambda m, sound=False: notes.append(m))
-        lines = log + [f"would start a {j['kind']} job: {j['project']}!{j['iid']}" for j in spawned]
-        lines += [f"would notify: {m}" for m in notes]
-        return "\n".join(lines + ["", "GitLab writes (none were made):", dry_report(dry.writes)])
-
-
-def dry_review(gl, url, model=None, run=None):
-    """The real review (git + claude, so it costs tokens) with every GitLab write printed instead of made."""
-    run = run or run_job
-    with dry_home():
-        dry = DryRunGitLab(gl)
-        cfg = {**load_config(), "notify": False}
-        manual_review(dry, url, spawn=lambda job: run(job, dry, cfg), model=model)
-        return "GitLab writes (none were made):\n\n" + dry_report(dry.writes)
 
 
 FETCH_TIMEOUT_SEC = 120
@@ -1963,15 +1790,6 @@ def run_job(job, gl=None, cfg=None):
 # --- review in your own session: the script gathers and publishes, your Claude reads and decides ----------
 
 
-
-
-
-
-
-
-
-
-
 # --- scheduling / diagnostics ---------------------------------------------------------
 
 def launchd_plist(interval, python, script, path_env):
@@ -2102,14 +1920,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="wiz_review")
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("tick")
-    g.add_argument("--dry-run", action="store_true", help="show the decisions; write nothing, start no review")
     g = sub.add_parser("run")
     g.add_argument("--job", required=True)
     g = sub.add_parser("review")
     g.add_argument("--url", required=True)
     g.add_argument("--model", help="model for this review only (alias like opus/sonnet/haiku, or a full id)")
-    g.add_argument("--dry-run", action="store_true",
-                   help="run the real review here (costs tokens) and print the drafts instead of writing them")
     g = sub.add_parser("diff")
     g.add_argument("--iid", type=int, required=True)
     g.add_argument("--base", required=True)
@@ -2131,20 +1946,12 @@ def main(argv=None):
     g.add_argument("action", choices=["set"])
     g.add_argument("key")
     g.add_argument("value")
-    for name in ("open-mr", "request", "reply"):
+    for name in ("open-mr", "request"):
         g = sub.add_parser(name)
         g.add_argument("--input", required=True)  # JSON file: free text never goes through the shell
-    g = sub.add_parser("threads")
-    g.add_argument("--url", required=True)
     a = ap.parse_args(argv)
 
-    if a.cmd == "tick" and a.dry_run:  # no lock: it changes nothing
-        try:
-            print(dry_tick(gitlab_from_env(), load_config()))
-        except (GitLabError, urllib.error.URLError, OSError) as e:
-            print(f"gitlab unavailable: {str(e)[:200]}")
-            return 2
-    elif a.cmd == "tick":
+    if a.cmd == "tick":
         import fcntl
         home().mkdir(parents=True, exist_ok=True)
         lock = open(home() / "tick.lock", "w")
@@ -2161,8 +1968,6 @@ def main(argv=None):
             print(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {line}")
     elif a.cmd == "run":
         return run_job(json.loads(Path(a.job).read_text()))
-    elif a.cmd == "review" and a.dry_run:
-        print(dry_review(gitlab_from_env(), a.url, model=a.model))
     elif a.cmd == "review":  # manual: review this MR now, whether or not the author asked
         job = manual_review(gitlab_from_env(), a.url, model=a.model)
         print(f"review started in background; log: {home() / 'logs' / (_key(job['project'], job['iid']) + '.log')}")
@@ -2227,19 +2032,16 @@ def main(argv=None):
             raise SystemExit(f"token rejected by GitLab: {str(e)[:150]}")
         save_token(tok)
         print(f"saved to {home() / 'token'} (0600); logged in as @{who}")
-    elif a.cmd in ("open-mr", "request", "reply"):
+    elif a.cmd in ("open-mr", "request"):
         args = json.loads(Path(a.input).expanduser().read_text())
         gl = gitlab_from_env()
-        fn = {"open-mr": open_mr, "request": request_review, "reply": reply_thread}[a.cmd]
+        fn = {"open-mr": open_mr, "request": request_review}[a.cmd]
         try:
             res = fn(gl, args)
         except (ValueError, SecretLeak, GitLabError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
         print(json.dumps(res or {"ok": True}, ensure_ascii=False))
-    elif a.cmd == "threads":
-        project, iid = _parse_url(a.url)
-        print(json.dumps(thread_summary(gitlab_from_env().discussions(project, iid)), ensure_ascii=False, indent=2))
     return 0
 
 

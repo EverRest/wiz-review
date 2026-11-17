@@ -69,7 +69,6 @@ Other commands:
 | Command | What it does |
 |---|---|
 | `/wiz-review:review-now <MR url>` | Review any MR now, without an author request. |
-| `/wiz-review:review-replies` | Show the reply threads of your MR. |
 | `/wiz-review:status` | Check that everything works. |
 | `/wiz-review rerun` (MR comment) | Review the new commits again. |
 
@@ -86,8 +85,6 @@ python3 "$(find ~/.claude/plugins -name wiz_review.py | head -1)" config set mod
 | Key | Default | What it does |
 |---|---|---|
 | `model` | `haiku` | Model for reviews. `inherit` = your own Claude Code model. `default` restores haiku. |
-| `require_green_ci` | `false` | `true`: wait for the MR's pipeline to finish, and do not review a red one until someone writes `rerun`. |
-| `ci_wait_max_min` | `30` | With `require_green_ci` on: review anyway after waiting this long. |
 | `max_inline` | `20` | Inline drafts per review; the rest go to the summary. |
 | `max_diff_lines` | `3000` | Diff lines sent in the packet; the rest is read on demand. |
 | `small_diff_lines` | `60` | Diffs up to this size get whole functions as context. |
@@ -101,7 +98,7 @@ python3 "$(find ~/.claude/plugins -name wiz_review.py | head -1)" config set mod
 
 Lists and numbers take JSON, for example `config set exclude '["*.snap"]'`.
 
-**Repo team file.** A repo can have `.claude/wiz-review.json` on its default branch. It can set `model`, `small_diff_lines`, `max_inline`, `exclude`, `require_green_ci`, `ci_wait_max_min`, `comment_language`, and `rules_always` (rules the review must check). It can only tighten your machine's settings: `exclude` is added to, and `require_green_ci` can only be turned on.
+**Repo team file.** A repo can have `.claude/wiz-review.json` on its default branch. It can set `model`, `small_diff_lines`, `max_inline`, `exclude`, `comment_language`, and `rules_always` (rules the review must check). It can only tighten your machine's settings: `exclude` is added to.
 
 ## Commands
 
@@ -110,9 +107,7 @@ Lists and numbers take JSON, for example `config set exclude '["*.snap"]'`.
 | Command | What it does |
 |---|---|
 | `WR doctor` | Diagnostics: token, GitLab, `claude`, repos, schedule. |
-| `WR tick --dry-run` | What the background run would do now. Writes nothing. |
-| `WR review --url <MR> [--model M] [--dry-run]` | Review one MR now. `--dry-run` prints the drafts instead of creating them. |
-| `WR threads --url <MR>` | List the open threads of an MR, used by `/wiz-review:review-replies`. |
+| `WR review --url <MR> [--model M]` | Review one MR now. |
 | `WR config set <key> <value>` | Change a setting (see above). |
 | `WR repos --root <folder>` | Set and rescan the clone folders. |
 | `WR schedule [--install \| --remove]` | Show, install, or remove the background run. |
@@ -129,7 +124,6 @@ Run `/wiz-review:status`. Each ❌ has a hint.
 | MR note "no local checkout" | Clone the repo into one of the `roots` folders. |
 | The review does not start | (1) The author ran `/request-review`, not only assigned you. (2) The MR is not Draft. (3) You are in Reviewers. (4) `doctor` shows no ❌. (5) The background run is installed: `launchctl print gui/$(id -u)/com.wiz-team.wiz-review`. (6) Log: `~/.wiz-review/logs/tick.log`. |
 | MR note "⚠️ wiz-review failed" | The note gives the cause. Details: `~/.wiz-review/logs/<project>__<MR>.log`. The plugin retries once. |
-| A review does something unexpected | `WR tick --dry-run` or `WR review --url <MR> --dry-run`. Neither writes to GitLab. |
 
 Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl` (time and cost per review), `config.json`, `repos.json`, `token`, `state/`.
 

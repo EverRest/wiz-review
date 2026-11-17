@@ -9,5 +9,5 @@ description: Use when the user asks whether wiz-review works, or why a review di
 2. For one specific MR, show the last 30 lines of:
    - `~/.wiz-review/logs/<project with / replaced by __>__<iid>.log`
    - `~/.wiz-review/logs/tick.log`
-3. If the user asks why a review did or did not do something, run `WR tick --dry-run`. It shows the decisions and writes nothing.
+3. If the user asks why a review did or did not do something, read `~/.wiz-review/logs/tick.log` and the MR notes.
 4. Summarize in a few lines. For each ❌, give the one command that fixes it.

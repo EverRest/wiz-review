@@ -35,7 +35,6 @@ Ask the user every question in the user's language.
      - `WR config set model default` (back to haiku)
    - Other settings use the same command form: `max_concurrent`, `interval_sec`, `notify true|false`, `exclude '["*.generated.md"]'`.
    - Reviews start as soon as the reviewer is picked. Drafts are never published automatically: the reviewer publishes them by hand. Tell the user this.
-   - To wait for CI before a review, the user runs `WR config set require_green_ci true`. It is off by default.
 4. **Install the background tick.**
    - On macOS, run `WR schedule` to print the launchd plist. After the user approves, run `WR schedule --install`.
    - On other systems, `WR schedule` prints a crontab line to add.
