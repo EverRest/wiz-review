@@ -15,10 +15,9 @@ Do not pass free text through shell quoting.
    Never push to a branch that another person owns.
 2. **Pick the reviewers.** Use the users that the user named. If the user named no one:
    - Find the target branch (from the repo's `CLAUDE.md` git workflow; ask if unknown).
-   - Run `WR suggest --target <target>` and read the owners from `CODEOWNERS` for the changed files.
+   - Read the owners from `CODEOWNERS` for the changed files.
    - If `CODEOWNERS` names owners, propose them in one line with the reason, for example "CODEOWNERS: @ivan, 14 commits here". Ask once: "Use these reviewers?" If the user says yes, use them.
-   - If there are no owners, propose the top 2 from `suggest`, and ask once.
-   - Suggestions have git names, not GitLab usernames. Map them to GitLab usernames when the user answers; do not ask for each one separately.
+   - If there are no owners, ask the user once who should review.
    Never add a reviewer without the user's yes.
 3. **Draft the whole note at once.** Collect what you do not know with one question, then show the full text as one block for approval. The block has these parts:
    - **Why** the change exists, with the Jira key if there is one.

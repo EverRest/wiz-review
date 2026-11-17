@@ -786,7 +786,7 @@ def _norm_path(path, repo):
 
 
 def _finding_ok(f):
-    """One finding in the schema the reviewer's Claude and `publish-findings` both must meet."""
+    """One finding in the schema the reviewer's Claude must meet."""
     return (isinstance(f, dict) and isinstance(f.get("path"), str) and bool(PATH_RE.match(f["path"]))
             and type(f.get("line")) is int and f["line"] >= 1
             and f.get("severity") in ("critical", "important", "minor")
@@ -1299,44 +1299,14 @@ def here(cwd="."):
 
 # --- feature 4: reviewers who know the code (local git only, zero tokens) ---------------
 
-SUGGEST_SINCE, SUGGEST_MAX_FILES, SUGGEST_TOP = "90.days.ago", 200, 5
 
 
-def changed_files_args(target):
-    return ["git", "-c", "core.quotePath=false", "diff", "--name-only", f"origin/{_check(BRANCH_RE, target, 'branch')}...HEAD"]
 
 
-def authors_log_args(files):
-    return ["git", "--literal-pathspecs", "log", "--no-merges", f"--since={SUGGEST_SINCE}",
-            "--format=%aN%x09%aE%x09%as", "--", *files[:SUGGEST_MAX_FILES]]
 
 
-def rank_authors(log_text, me_email):
-    """Authors of recent commits to the changed files, most commits first; the author of the change is left out."""
-    by = {}
-    for line in log_text.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        name, email, day = parts
-        key = email.strip().lower()
-        if not key or key == (me_email or "").strip().lower():
-            continue
-        c = by.setdefault(key, {"name": name, "email": key, "commits": 0, "last": day})
-        c["commits"] += 1
-        if day >= c["last"]:
-            c["last"], c["name"] = day, name
-    return sorted(by.values(), key=lambda c: (-c["commits"], c["email"]))
 
 
-def suggest_reviewers(repo, target):
-    """-> {files, candidates}. Git names and emails only: the user confirms the GitLab username."""
-    committed = _git_out(changed_files_args(target), repo).splitlines()
-    uncommitted = _git_out(["git", "-c", "core.quotePath=false", "diff", "--name-only", "HEAD"], repo).splitlines()
-    files = sorted({f for f in committed + uncommitted if f.strip()})
-    me = subprocess.run(["git", "config", "user.email"], cwd=repo, capture_output=True, text=True).stdout
-    log = _git_out(authors_log_args(files), repo) if files else ""
-    return {"files": files, "candidates": rank_authors(log, me)[:SUGGEST_TOP]}
 
 
 # --- tick: the whole protocol, zero LLM ---------------------------------------------
@@ -1894,7 +1864,7 @@ def pin_head(repo, iid, sha):
 
 
 def review_packet(gl, job, mr, refs, cfg, repo):
-    """The packet a review reads, built the same way for the background review and for `mr-context`.
+    """The packet a review reads, built the same way for the background review and for the review.
     -> {packet, pst, meta, full}. Calls no model; writes nothing to GitLab."""
     project, iid = job["project"], int(job["iid"])
     full = _git_out(diff_args(iid, refs["base_sha"]), repo)
@@ -1992,88 +1962,14 @@ def run_job(job, gl=None, cfg=None):
 
 # --- review in your own session: the script gathers and publishes, your Claude reads and decides ----------
 
-def _need_checkout(project, cfg):
-    repo = find_repo(project, cfg)
-    if not repo:
-        raise ValueError(f"no local checkout for {project}; clone it under one of the `roots` in ~/.wiz-review/config.json")
-    return repo
 
 
-def _checkout_mr(gl, project, iid, repo):
-    """The MR's own refs, fetched and pinned to the head GitLab reports. Never the reviewer's branch or working tree."""
-    mr = gl.mr(project, iid)
-    refs = {k: mr["diff_refs"][k] for k in ("base_sha", "start_sha", "head_sha")}
-    _fetch(fetch_args(iid, mr["target_branch"]), repo)
-    if not pin_head(repo, iid, refs["head_sha"]):
-        raise ValueError("the MR head moved while fetching; run the command again")
-    return mr, refs
 
 
-def mr_context(gl, url, cfg=None):
-    """`mr-context`: what a review would read, as one JSON object. Fetches the refs and builds the packet; calls no
-    model and posts nothing."""
-    project, iid = _parse_url(url)
-    cfg = cfg or load_config()
-    repo = _need_checkout(project, cfg)
-    mr, refs = _checkout_mr(gl, project, iid, repo)
-    job = {"kind": "review", "project": project, "iid": iid, "url": url, "repo": repo, "since": None}
-    try:
-        r = review_packet(gl, job, mr, refs, cfg, repo)
-        files = [f[0] for f in diff_files(r["full"], cfg["exclude"])]
-    finally:
-        for args in cleanup_args(iid):
-            subprocess.run(args, cwd=repo, capture_output=True)
-    return {"iid": iid, "project": project, "title": mr.get("title", ""), "base_sha": refs["base_sha"],
-            "head_sha": refs["head_sha"], "diff_refs": refs, "files": files, "packet": r["packet"]}
 
 
-def _publish_agent(findings):
-    """The tag for a published review: the tool is fixed; the model is kept only if it looks like a model name."""
-    raw = findings.get("agent") if isinstance(findings.get("agent"), dict) else {}
-    model = raw.get("model")
-    if not (isinstance(model, str) and len(model) <= 60 and MODEL_RE.match(model)):
-        model = "interactive session"
-    return {"tool": AGENT_TOOL, "model": model}
 
 
-def publish_findings(gl, url, findings, cfg=None):
-    """`publish-findings`: the findings you approved become DRAFT notes. No review note:
-    you still publish or delete each one in GitLab. The same schema, scrubbing and tag as a background review."""
-    project, iid = _parse_url(url)
-    cfg = cfg or load_config()
-    if (not isinstance(findings, dict) or not isinstance(findings.get("summary"), str)
-            or not isinstance(findings.get("findings"), list) or not all(_finding_ok(f) for f in findings["findings"])):
-        raise ValueError("findings do not match the schema: {summary, findings: [{path, line, severity, confidence, body, suggestion?}]}")
-    agent = _publish_agent(findings)  # never the file's own tag text: only a validated model name reaches GitLab
-    findings = {**findings, "agent": agent}  # plan_notes reads the tag from here too
-    texts = [findings["summary"]] + [f["body"] + f.get("suggestion", "") for f in findings["findings"]] + [agent["model"]]
-    if any(find_secrets(t, [getattr(gl, "_token", None)]) for t in texts):
-        raise SecretLeak("findings contain something that looks like a secret; nothing was posted")
-    repo = _need_checkout(project, cfg)
-    _, refs = _checkout_mr(gl, project, iid, repo)
-    try:
-        full = _git_out(diff_args(iid, refs["base_sha"]), repo)
-    finally:
-        for args in cleanup_args(iid):
-            subprocess.run(args, cwd=repo, capture_output=True)
-    inline, summary = plan_notes(findings, parse_diff(full), refs, cfg)
-    created = []
-    try:
-        for item in inline:
-            try:
-                created.append(gl.create_draft(project, iid, item["note"], item["position"]))
-            except GitLabError:  # GitLab refused the anchor: keep the finding, lose only the position
-                summary += "\n\n" + _line(item["finding"])
-        created.append(gl.create_draft(project, iid, f"**{msg_for(cfg)['summary']}**\n\n" + summary
-                                      + f"\n\n{agent_tag(agent)}"))
-    except Exception:  # all or nothing, like a background round
-        for d in created:
-            try:
-                gl.delete_draft(project, iid, d["id"])
-            except Exception:
-                pass
-        raise
-    return {"drafts": len(created), "project": project, "iid": iid}
 
 
 # --- scheduling / diagnostics ---------------------------------------------------------
@@ -2231,13 +2127,6 @@ def main(argv=None):
     sub.add_parser("doctor")
     sub.add_parser("login")
     sub.add_parser("here")
-    g = sub.add_parser("suggest")
-    g.add_argument("--target", required=True)
-    g = sub.add_parser("mr-context", help="review-with-me: what a review reads, as JSON; calls no model, posts nothing")
-    g.add_argument("--url", required=True)
-    g = sub.add_parser("publish-findings", help="review-with-me: approved findings become draft notes, never published")
-    g.add_argument("--url", required=True)
-    g.add_argument("--input", required=True, help="JSON file with summary + findings (the background review's schema)")
     g = sub.add_parser("config")
     g.add_argument("action", choices=["set"])
     g.add_argument("key")
@@ -2272,15 +2161,6 @@ def main(argv=None):
             print(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} {line}")
     elif a.cmd == "run":
         return run_job(json.loads(Path(a.job).read_text()))
-    elif a.cmd in ("mr-context", "publish-findings"):
-        try:
-            if a.cmd == "mr-context":
-                out = mr_context(gitlab_from_env(), a.url)
-            else:
-                out = publish_findings(gitlab_from_env(), a.url, json.loads(Path(a.input).read_text(encoding="utf-8")))
-        except (ValueError, SecretLeak, GitLabError, json.JSONDecodeError) as e:
-            raise SystemExit(f"error: {e}")
-        print(json.dumps(out, ensure_ascii=False))
     elif a.cmd == "review" and a.dry_run:
         print(dry_review(gitlab_from_env(), a.url, model=a.model))
     elif a.cmd == "review":  # manual: review this MR now, whether or not the author asked
@@ -2336,8 +2216,6 @@ def main(argv=None):
         set_config(a.key, a.value)
     elif a.cmd == "here":
         print(json.dumps(here()))
-    elif a.cmd == "suggest":
-        print(json.dumps(suggest_reviewers(here()["repo"], a.target), ensure_ascii=False, indent=2))
     elif a.cmd == "login":
         import getpass
         tok = getpass.getpass("GitLab personal access token (scope api; input hidden): ").strip()

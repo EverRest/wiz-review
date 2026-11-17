@@ -69,7 +69,6 @@ Other commands:
 | Command | What it does |
 |---|---|
 | `/wiz-review:review-now <MR url>` | Review any MR now, without an author request. |
-| `/wiz-review:review-with-me <MR url>` | Review an MR in your own session: Claude proposes findings, you approve them, then they become drafts. |
 | `/wiz-review:review-replies` | Show the reply threads of your MR. |
 | `/wiz-review:status` | Check that everything works. |
 | `/wiz-review rerun` (MR comment) | Review the new commits again. |
@@ -113,7 +112,6 @@ Lists and numbers take JSON, for example `config set exclude '["*.snap"]'`.
 | `WR doctor` | Diagnostics: token, GitLab, `claude`, repos, schedule. |
 | `WR tick --dry-run` | What the background run would do now. Writes nothing. |
 | `WR review --url <MR> [--model M] [--dry-run]` | Review one MR now. `--dry-run` prints the drafts instead of creating them. |
-| `WR suggest --target <branch>` | People who changed the same files recently. |
 | `WR threads --url <MR>` | List the open threads of an MR, used by `/wiz-review:review-replies`. |
 | `WR config set <key> <value>` | Change a setting (see above). |
 | `WR repos --root <folder>` | Set and rescan the clone folders. |
