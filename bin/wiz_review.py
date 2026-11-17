@@ -2,7 +2,7 @@
 """wiz-review: peer-to-peer GitLab MR review for Claude Code.
 
 Everything deterministic lives here and costs zero LLM tokens: polling GitLab, deciding what to
-do, building a compact review packet, posting draft notes, timers, metrics. Claude is started
+do, building a compact review packet, posting draft notes, timers. Claude is started
 only for the review itself (`claude -p`, packet on stdin, findings back as JSON).
 Stdlib only.
 """
@@ -43,14 +43,11 @@ DEFAULTS = {
     "max_concurrent": 2,        # parallel headless reviews on this machine
     "review_timeout_min": 25,   # kill a runaway review
     "model": "haiku",           # cheapest; None ("inherit") = the developer's own Claude Code model
-    "fix_history": True,        # past fix/bug commits touching the changed files go into the packet
     "history_in_packet": 10,    # the reviewer's own earlier comments / commits sent as examples of their taste; 0 = off
-    "small_diff_lines": 60,     # diffs up to this many changed lines get whole functions as context
     "max_diff_lines": 3000,     # diff lines embedded in the packet; the rest is read on demand
     "max_inline": 20,           # inline drafts per review; overflow goes to the summary
     "notify": True,             # local desktop notification
     "exclude": [],              # extra glob patterns of files not worth reviewing
-    "comment_language": "uk",   # uk | en: the plugin's own note texts and the language the model writes findings in
 }
 
 MARKER_RE = re.compile(r"^<!-- wiz-review:([a-z-]+)(?: sha=([0-9a-f]+))? -->")
@@ -241,7 +238,7 @@ def load_config():
 
 
 MODEL_RE = re.compile(r"^(?!-)[A-Za-z0-9][A-Za-z0-9._\[\]-]*$")  # alias (sonnet, opus…) or full id; never a flag
-INT_MIN = {"interval_sec": 30, "max_concurrent": 1, "review_timeout_min": 1, "small_diff_lines": 0,
+INT_MIN = {"interval_sec": 30, "max_concurrent": 1, "review_timeout_min": 1,
            "max_diff_lines": 1, "max_inline": 0, "history_in_packet": 0}
 
 
@@ -264,10 +261,6 @@ def parse_config_value(key, raw):
         if not valid_model(raw):
             raise SystemExit(f"{key}: not a model name: {raw!r} (aliases like sonnet/opus/haiku or a full id)")
         return raw
-    if key == "comment_language":
-        if raw.lower() not in ("uk", "en"):
-            raise SystemExit("comment_language must be uk or en")
-        return raw.lower()
     if key in INT_MIN:
         try:
             v = int(raw)
@@ -276,7 +269,7 @@ def parse_config_value(key, raw):
         if v < INT_MIN[key]:
             raise SystemExit(f"{key} must be at least {INT_MIN[key]}")
         return v
-    if key in ("notify", "fix_history"):
+    if key == "notify":
         if raw.lower() not in ("true", "false"):
             raise SystemExit(f"{key} must be true or false")
         return raw.lower() == "true"
@@ -292,8 +285,7 @@ def parse_config_value(key, raw):
 
 
 TEAM_FILE = ".claude/wiz-review.json"  # in the reviewed repo; read from the default branch head, never the MR or its target
-TEAM_KEYS = ("model", "small_diff_lines", "max_inline", "exclude",
-             "comment_language", "rules_always")
+TEAM_KEYS = ("model", "max_inline", "exclude", "rules_always")
 # everything else (roots, tokens, rules_never...) stays per machine.
 # rules_never is not here: a repo file must not be able to hide findings. The keys below can only make the machine stricter.
 TEAM_MAX_BYTES, RULE_ITEMS, RULE_CHARS, RULE_ITEM_CHARS = 65536, 20, 2000, 200
@@ -356,8 +348,7 @@ def team_head(gl, project):
 def apply_team(cfg, team):
     """defaults < machine config.json < the repo's team file. The repo can add to the machine's rules, never remove them:
     exclude is a union."""
-    out = {**cfg, **{k: v for k, v in team.items() if k in ("model", "small_diff_lines", "max_inline",
-                                                            "comment_language", "rules_always")}}
+    out = {**cfg, **{k: v for k, v in team.items() if k in ("model", "max_inline", "rules_always")}}
     if "exclude" in team:
         out["exclude"] = sorted(set(cfg.get("exclude") or []) | set(team["exclude"]))
     return out
@@ -409,13 +400,6 @@ TAG_RE = re.compile(r"\n\n🤖 _wiz-review · .*_\s*$")  # the attribution line 
 
 
 HISTORY_COMMITS = 15  # your recent commits to the changed files that go into the packet
-
-
-def log_metric(rec):
-    p = home() / "metrics.jsonl"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
-        f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), **rec}, ensure_ascii=False) + "\n")
 
 
 # --- local checkouts -------------------------------------------------------------
@@ -515,9 +499,8 @@ GIT_DIFF = ["git", "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext
             "--src-prefix=a/", "--dst-prefix=b/"]
 
 
-def diff_args(iid, base, path=None, wide=False):
-    """wide: whole changed functions (packet only; inline anchors always use the normal diff)."""
-    args = GIT_DIFF + (["--function-context"] if wide else []) + [f"{_check(SHA_RE, base, 'sha')}..refs/wiz-review/{int(iid)}"]
+def diff_args(iid, base, path=None):
+    args = GIT_DIFF + [f"{_check(SHA_RE, base, 'sha')}..refs/wiz-review/{int(iid)}"]
     return args + ["--", _check(PATH_RE, path, "path")] if path else args
 
 
@@ -675,7 +658,7 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review"):
     parts = [INSTRUCTIONS.format(subject="one GitLab merge request", whose="reviewer's", tools_rule=rule,
                                  mode=FALLBACK_MODE if kind == "fallback" else ""),
              f"\n## Merge request\n{meta['url']}\nTarget branch: {meta['target']}"]
-    parts.append(f"## Language\nWrite the body of each finding and the summary in {msg_for(cfg)['lang']}.")
+    parts.append("## Language\nWrite the body of each finding and the summary in Ukrainian.")
     if since:
         parts.append(f"This is a re-review: only changes after commit {since} are shown. Do not repeat earlier findings.")
     parts.append("## Title\n" + _untrusted(meta.get("title", "")))
@@ -696,9 +679,6 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review"):
     if rules:
         parts.append("## Team rules for this repo (written by the repo owners, from the base branch)\n"
                      + _untrusted("\n".join(rules)))
-    if meta.get("fixes"):
-        parts.append("## Past fixes in these files (what broke here before — look for the same mistake again)\n"
-                     + _untrusted("\n".join(f"- {t}" for t in meta["fixes"])))
     parts.append("## Author's request note\n" + _untrusted(request_note or "(none)"))
     if omitted:
         parts.append("## Changed files NOT included below (too large — read them on demand)\n"
@@ -708,11 +688,6 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review"):
     parts.append("## Diff\n" + _untrusted("\n".join(kept)))
     return "\n\n".join(parts), {"changed_lines": changed, "files": len(kept) + len(omitted),
                                 "skipped": skipped, "truncated": bool(omitted)}
-
-
-def wide_diff(changed_lines, cfg):
-    """Small diffs get whole functions: cheap, and the change makes sense in its context."""
-    return 0 < changed_lines <= cfg["small_diff_lines"]
 
 
 def pick_model(job, cfg):
@@ -825,7 +800,7 @@ AGENT_TOOL = "Claude Code"  # what runs the review; the tag names it so readers 
 
 
 def make_agent(model, meta, cfg):
-    """Who did the review (the tag names the tool and the model; tokens and cost go to metrics only)."""
+    """Who did the review (the tag names the tool and the model)."""
     return {"tool": AGENT_TOOL, "model": model, "tokens_in": meta.get("tokens_in"), "tokens_out": meta.get("tokens_out"),
             "cost_usd": meta.get("cost_usd")}
 
@@ -1256,8 +1231,7 @@ def mr_info(raw):
             "target": raw["target_branch"], "title": raw.get("title", "")}
 
 
-MSG = {
-    "uk": {"pickup": "рев'ю почато", "summary": "wiz-review — підсумок",
+MSG = {"pickup": "рев'ю почато", "summary": "wiz-review — підсумок",
            "fallback_title": "🤖 **Авто-рев'ю на машині автора** (ніхто з рев'юерів не взявся)",
            "fallback_start": "🤖 Ніхто з рев'юерів не взявся — запускаю авто-рев'ю на машині автора.",
            "failed": "⚠️ @{me}: wiz-review не вдалося (`{msg}`). Буде одна автоматична повторна спроба.",
@@ -1265,21 +1239,11 @@ MSG = {
                               "(запустить новий цикл, а за потреби й запасне рев'ю).",
            "ready": "@{me}: чернетки рев'ю готові ({n}), зробив {tool} ({model}). Опублікуй або відредагуй у GitLab.",
            "model_unknown": "модель невідома",
-           "lang": "Ukrainian"},
-    "en": {"pickup": "review started", "summary": "wiz-review — summary",
-           "fallback_title": "🤖 **Automatic review on the author's machine** (no reviewer picked it up)",
-           "fallback_start": "🤖 No reviewer picked it up — starting the automatic review on the author's machine.",
-           "failed": "⚠️ @{me}: wiz-review failed (`{msg}`). One automatic retry will follow.",
-           "fallback_failed": "⚠️ The fallback review failed (`{msg}`). To retry: run `/wiz-review:request-review` again "
-                              "(starts a new cycle, and the fallback if needed).",
-           "ready": "@{me}: review drafts are ready ({n}), made by {tool} ({model}). Publish or edit them in GitLab.",
-           "model_unknown": "model unknown",
-           "lang": "English"},
 }
 
 
-def msg_for(cfg):
-    return MSG.get((cfg or {}).get("comment_language"), MSG["uk"])
+def msg_for(cfg=None):
+    return MSG
 
 
 def _pickup(gl, info, me, how="", extra="", cfg=None):
@@ -1599,34 +1563,6 @@ def reviewer_context(project, repo, base, diff, cfg, kind):
     return ctx
 
 
-FIX_RE = r"(^|[^a-z])(fix|fixed|hotfix|bug|revert|regression)([^a-z]|$)"
-FIX_COMMITS, FIX_FILES, FIX_CHARS, FIX_LINE = 10, 20, 2500, 200
-
-
-def past_fixes(repo, base, names):
-    """Fix/bug/revert commits that touched the changed files, on the base (the MR's own commits are not in it).
-    Repo history, not MR data, but commit text is free text: untrusted-wrapped by the caller. -> one line per commit,
-    at most FIX_COMMITS commits and FIX_CHARS characters; [] when there are none."""
-    names = [_check(PATH_RE, n, "path") for n in names[:FIX_FILES]]
-    if not names:
-        return []
-    out = _git_out(["git", "--literal-pathspecs", "log", "--no-merges", "-n", str(FIX_COMMITS), "-i", "-E", "--grep", FIX_RE,
-                    "--format=%x1e%h%x1f%as%x1f%s%x1f%b", _check(SHA_RE, base, "sha"), "--", *names], repo)
-    lines, seen, used = [], set(), 0
-    for rec in out.split("\x1e")[1:]:
-        sha, day, subj, body = (rec.split("\x1f", 3) + ["", "", "", ""])[:4]
-        if subj in seen:
-            continue
-        seen.add(subj)
-        extra = " | ".join(ln.strip()[:FIX_LINE] for ln in [x for x in body.splitlines() if x.strip()][:2])
-        line = scrub(f"{sha} {day}: {subj[:FIX_LINE]}" + (f" — {extra}" if extra else ""))
-        if used + len(line) > FIX_CHARS:
-            break
-        lines.append(line)
-        used += len(line)
-    return lines
-
-
 GUIDE_DIR, GUIDE_MAX, GUIDE_CHARS = ".claude/review", 4, 8000
 
 
@@ -1686,20 +1622,9 @@ def review_packet(gl, job, mr, refs, cfg, repo):
         print(f"area guides left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
     if guides:
         meta["guides"] = guides
-    if cfg.get("fix_history", True):  # repo history: every kind of review, on the base (MR commits excluded)
-        try:
-            fixes = past_fixes(repo, refs["base_sha"], [f[0] for f in diff_files(full, cfg["exclude"])])
-        except Exception as e:
-            fixes = []
-            print(f"past fixes left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-        if fixes:
-            meta["fixes"] = fixes
     if job["kind"] == "review":
         meta.update(rctx)
     packet, pst = build_packet(meta, req, shown, cfg, since, job["kind"])
-    if wide_diff(pst["changed_lines"], cfg):  # same changes, whole functions around them (anchors use `full`)
-        packet, pst = build_packet(meta, req, _git_out(diff_args(iid, since or refs["base_sha"], wide=True), repo),
-                                   cfg, since, job["kind"])
     return {"packet": packet, "pst": pst, "meta": meta, "full": full}
 
 
@@ -1709,7 +1634,7 @@ def run_job(job, gl=None, cfg=None):
     pid = home() / "run" / f"{_key(project, iid)}.pid"
     pid.parent.mkdir(parents=True, exist_ok=True)
     pid.write_text(str(os.getpid()))
-    t0, rec = time.time(), {"kind": job["kind"], "project": project, "iid": iid}
+    rec = {"kind": job["kind"], "project": project, "iid": iid}
     try:
         mr = gl.mr(project, iid)
         refs = {k: mr["diff_refs"][k] for k in ("base_sha", "start_sha", "head_sha")}
@@ -1754,8 +1679,6 @@ def run_job(job, gl=None, cfg=None):
     finally:
         for args in cleanup_args(iid):  # don't leave refs behind in the reviewer's clone
             subprocess.run(args, cwd=repo, capture_output=True)
-        rec["duration_s"] = round(time.time() - t0)
-        log_metric(rec)
         pid.unlink(missing_ok=True)
     return 1 if rec.get("error") else 0
 

@@ -87,18 +87,15 @@ python3 "$(find ~/.claude/plugins -name wiz_review.py | head -1)" config set mod
 | `model` | `haiku` | Model for reviews. `inherit` = your own Claude Code model. `default` restores haiku. |
 | `max_inline` | `20` | Inline drafts per review; the rest go to the summary. |
 | `max_diff_lines` | `3000` | Diff lines sent in the packet; the rest is read on demand. |
-| `small_diff_lines` | `60` | Diffs up to this size get whole functions as context. |
-| `fix_history` | `true` | Past fix commits to the same files go into the packet. |
 | `history_in_packet` | `10` | Your recent commits to the changed files go into the packet as context; `0` = off. |
 | `exclude` | `[]` | Extra glob patterns of files not to review, for example `["*.generated.md"]`. |
-| `comment_language` | `uk` | `uk` or `en`: the plugin's own texts and the language of the findings. |
 | `notify` | `true` | Desktop notification. |
 | `roots` | `["~/code"]` | Folders where your clones live. |
 | `max_concurrent` | `2` | Parallel reviews on this machine. |
 
 Lists and numbers take JSON, for example `config set exclude '["*.snap"]'`.
 
-**Repo team file.** A repo can have `.claude/wiz-review.json` on its default branch. It can set `model`, `small_diff_lines`, `max_inline`, `exclude`, `comment_language`, and `rules_always` (rules the review must check). It can only tighten your machine's settings: `exclude` is added to.
+**Repo team file.** A repo can have `.claude/wiz-review.json` on its default branch. It can set `model`, `max_inline`, `exclude`, and `rules_always` (rules the review must check). It can only tighten your machine's settings: `exclude` is added to.
 
 ## Commands
 
@@ -125,7 +122,7 @@ Run `/wiz-review:status`. Each ❌ has a hint.
 | The review does not start | (1) The author ran `/request-review`, not only assigned you. (2) The MR is not Draft. (3) You are in Reviewers. (4) `doctor` shows no ❌. (5) The background run is installed: `launchctl print gui/$(id -u)/com.wiz-team.wiz-review`. (6) Log: `~/.wiz-review/logs/tick.log`. |
 | MR note "⚠️ wiz-review failed" | The note gives the cause. Details: `~/.wiz-review/logs/<project>__<MR>.log`. The plugin retries once. |
 
-Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl` (time and cost per review), `config.json`, `repos.json`, `token`, `state/`.
+Logs and data are in `~/.wiz-review/`: `logs/`, `config.json`, `repos.json`, `token`, `state/`.
 
 ## Security and privacy
 

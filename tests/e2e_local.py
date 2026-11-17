@@ -7,6 +7,7 @@ It talks only to 127.0.0.1: nobody is notified, nothing touches the real GitLab.
     python3 tests/e2e_local.py
 """
 import json
+import re
 import os
 import subprocess
 import sys
@@ -93,9 +94,6 @@ class Machine:
         p.write_text(json.dumps(data))
         return str(p)
 
-    def metrics(self):
-        p = self.home / "metrics.jsonl"
-        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
 
 def wait_for(pred, timeout=180, step=3):
@@ -155,17 +153,11 @@ def main():
     check("reviewer's branch and tree untouched", out("git", "branch", "--show-current", cwd=clones["pavlo"]) == "develop"
           and out("git", "status", "--short", cwd=clones["pavlo"]) == "")
     check("service refs cleaned up", out("git", "for-each-ref", "refs/wiz-review", cwd=clones["pavlo"]) == "")
-    m = pavlo.metrics()
-    check("metrics recorded with cost", len(m) == 1 and not m[0].get("error") and m[0].get("cost_usd") is not None, str(m))
-    check("the plugin default model (haiku) was used", m and "haiku" in (m[0].get("model") or ""), str(m))
-    tag = "🤖 _wiz-review · Claude Code · " + (m[0].get("model") if m else "?") + "_"
-    check("every draft ends with the tool and model tag",
-          drafts and all(d["note"].rstrip().split("\n")[-1] == tag for d in drafts),
-          str([d["note"][-120:] for d in drafts]))
-    check("metrics carry tokens and cost", m and m[0].get("tokens_in") and m[0].get("tokens_out") and m[0].get("cost_usd") is not None, str(m))
-    check("drafts-ready note names tool and model", any("Claude Code" in b and m[0].get("model", "?") in b
+    tag_re = re.compile(r"\n🤖 _wiz-review · Claude Code · (claude-haiku[^_]*)_$")
+    check("every draft ends with the tool and the default model (haiku) tag",
+          drafts and all(tag_re.search(d["note"]) for d in drafts), str([d["note"][-120:] for d in drafts]))
+    check("drafts-ready note names tool and model", any("Claude Code" in b and "claude-haiku" in b
                                                          for b in bodies(gl, key) if b.startswith("<!-- wiz-review:drafts-ready")))
-    print(f"   review cost ${m[0].get('cost_usd')}, {m[0].get('duration_s')} s, findings {m[0].get('findings')}" if m else "")
 
     # 3. author's tick: reviewer is progressing, no fallback
     olena.wr("tick")
@@ -184,12 +176,11 @@ def main():
     check("author notified once about done", any(s.get("notified") for s in st), str(st))
 
     # 6. rerun without new commits answers without spending Claude
-    spent = len(pavlo.metrics())
     gl.add_note(key, "olena", "/wiz-review rerun")
     pavlo.wr("tick")
     time.sleep(2)
     check("rerun without new commits: answered, no Claude run",
-          any("нових комітів немає" in b for b in bodies(gl, key)) and len(pavlo.metrics()) == spent)
+          any("нових комітів немає" in b for b in bodies(gl, key)))
 
     # 7. nobody to review -> author's machine runs the fallback review
     key2 = (PROJECT, 2)

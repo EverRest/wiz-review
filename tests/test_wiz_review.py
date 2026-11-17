@@ -611,13 +611,6 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(cmd, wr.review_cmd("review", None, wr.DEFAULTS))  # C1: fallback gets no Agent/Skill
 
     # --- gap 4: whole functions for small diffs, in the packet only ---
-    def test_function_context_only_for_small_diffs(self):
-        self.assertIn("--function-context", wr.diff_args(142, "abc123", wide=True))
-        self.assertNotIn("--function-context", wr.diff_args(142, "abc123"))
-        cfg = {**wr.DEFAULTS, "small_diff_lines": 60}
-        self.assertTrue(wr.wide_diff(60, cfg))
-        self.assertFalse(wr.wide_diff(61, cfg))
-        self.assertFalse(wr.wide_diff(0, cfg))  # nothing to review: no second git call
 
     # --- gap 7: sibling clones, read-only ---
 
@@ -1097,7 +1090,7 @@ class ModelAndConfigTypesTests(TempHome):
 
     def test_config_set_is_typed(self):
         self.assertEqual(self.set("max_concurrent", "3"), 3)
-        self.assertEqual(self.set("small_diff_lines", "80"), 80)
+        self.assertEqual(self.set("max_inline", "80"), 80)
         self.assertIs(self.set("notify", "false"), False)
         self.assertIs(self.set("notify", "true"), True)
         self.assertEqual(self.set("exclude", '["*.generated.md"]'), ["*.generated.md"])
@@ -1746,7 +1739,7 @@ def claude_json(findings, cost=0.01, summary="main"):
 
 
 class TeamSettingsTests(TempHome):
-    """.claude/wiz-review.json: which keys the repo may set, precedence, language, team rules, size skip."""
+    """.claude/wiz-review.json: which keys the repo may set, precedence, team rules."""
 
 
     def test_forbidden_keys_are_never_read_from_the_repo(self):
@@ -1760,7 +1753,7 @@ class TeamSettingsTests(TempHome):
 
     def test_invalid_values_are_ignored_not_fatal(self):
         with contextlib.redirect_stderr(io.StringIO()):
-            t = wr.repo_settings('{"model": "bad model!", "max_inline": -1, "comment_language": "fr", '
+            t = wr.repo_settings('{"model": "bad model!", "max_inline": -1, '
                                  '"require_green_ci": "maybe", "rules_always": "not a list"}')
         self.assertEqual(t, {})
 
@@ -1776,20 +1769,7 @@ class TeamSettingsTests(TempHome):
         self.assertEqual(cfg["model"], "sonnet")  # repo wins for an allowed key
         self.assertEqual(cfg["roots"], ["~/code"])  # forbidden keys keep the machine's value
 
-    def test_language_default_is_uk_and_en_changes_the_fixed_texts(self):
-        self.assertIs(wr.msg_for({}), wr.MSG["uk"])
-        self.assertEqual(wr.msg_for({"comment_language": "en"})["pickup"], "review started")
-        self.assertEqual(wr.parse_config_value("comment_language", "EN"), "en")
-        with self.assertRaises(SystemExit):
-            wr.parse_config_value("comment_language", "fr")
-        gl = FakeGL()
-        wr._pickup(gl, {"project": "group/m-seq", "iid": 142, "sha": "abc123"}, "pavlo", cfg={"comment_language": "en"})
-        self.assertIn("review started", gl.posted[-1])
 
-    def test_packet_states_the_language_and_default_stays_ukrainian(self):
-        meta = {"url": URL, "title": "t", "target": "develop"}
-        self.assertIn("in English.", wr.build_packet(meta, "", DIFF, {**wr.DEFAULTS, "comment_language": "en"})[0])
-        self.assertIn("in Ukrainian.", wr.build_packet(meta, "", DIFF, dict(wr.DEFAULTS))[0])
 
 
     def test_team_rules_are_capped_and_wrapped_as_untrusted(self):
@@ -1825,65 +1805,10 @@ class TeamGitLabTests(unittest.TestCase):
         self.assertIn("/repository/files/.claude%2Fwiz-review.json?ref=" + "b" * 40, seen[1])
 
 
-class RunJobTests(TempHome):
-    """run_job end to end with git and claude stubbed: the packet it sends and what the metrics record says."""
-    JOB = {"kind": "review", "project": "group/m-seq", "iid": 142, "url": URL, "since": None, "sha": "abc123", "title": "T"}
-
-    def run_job(self, kind="review", outputs=None, **cfg):
-        from types import SimpleNamespace
-        repo = tempfile.mkdtemp()
-        self.addCleanup(lambda: __import__("shutil").rmtree(repo, ignore_errors=True))
-        calls, outs = [], list(outputs or [])
-        orig = (wr._fetch, wr.pin_head, wr._git_out, wr.subprocess.run)
-
-        def spy(args, **kw):
-            if args and args[0] == "claude":
-                calls.append(kw["input"])
-                return SimpleNamespace(stdout=outs.pop(0) if outs else claude_json([finding()]), stderr="", returncode=0)
-            return orig[3](args, **kw)
-        wr._fetch, wr.pin_head = (lambda *a, **k: ""), (lambda *a, **k: True)
-        wr._git_out = lambda args, repo, timeout=None: DIFF if "diff" in args else ""
-        wr.subprocess.run = spy
-        gl = FakeGL()
-        try:
-            rc = wr.run_job({**self.JOB, "kind": kind, "repo": repo}, gl,
-                            {**wr.DEFAULTS, "roots": [], "notify": False, **cfg})
-        finally:
-            wr._fetch, wr.pin_head, wr._git_out, wr.subprocess.run = orig
-        rec = [json.loads(x) for x in (self.home / "metrics.jsonl").read_text().splitlines()][-1]
-        return rc, calls, rec, gl
-
-    def test_fix_history_switch_decides_whether_fixes_reach_the_packet(self):
-        orig = wr.past_fixes
-        wr.past_fixes = lambda repo, base, names: ["abc1234 2026-01-02: fix crash"]
-        try:
-            _, on, _, _ = self.run_job()
-            _, off, _, _ = self.run_job(fix_history=False)
-            _, fb, _, _ = self.run_job(kind="fallback")  # repo content: fallback gets it too
-        finally:
-            wr.past_fixes = orig
-        self.assertIn("Past fixes in these files", on[0])
-        self.assertNotIn("Past fixes", off[0])
-        self.assertIn("Past fixes in these files", fb[0])
 
 
 
 
-class TeamRunJobTests(TempHome):
-    """run_job with git and claude stubbed (the same harness as RunJobTests)."""
-    run_job = RunJobTests.run_job
-    JOB = RunJobTests.JOB
-
-
-
-    def test_team_file_on_the_default_branch_sets_the_language_of_the_packet(self):
-        orig = FakeGL.repo_file
-        FakeGL.repo_file = lambda self, project, path, ref: '{"comment_language": "en", "comment_language_bogus": 1}'
-        try:
-            rc, calls, rec, gl = self.run_job()
-        finally:
-            FakeGL.repo_file = orig
-        self.assertIn("in English.", calls[0])
 
 
 if __name__ == "__main__":
