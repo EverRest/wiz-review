@@ -15,4 +15,3 @@ description: Use when the author wants to see or address review comments on thei
    Write `{"url": …, "discussion": <id>, "body": …, "resolve": true|false}` to a JSON file. Run `WR reply --input <file>`.
 6. After new commits, offer to post `/wiz-review rerun` as an MR comment.
    The reviewers' agents then check only the new changes.
-7. If the user says a kind of comment should never appear in this repo, do not just delete drafts: offer `WR lessons add --project <project> --text "<their words>"` and run it only after they approve the exact text.

@@ -444,76 +444,28 @@ def save_roots(roots):
     _atomic_write(p, json.dumps(cfg, indent=2))
 
 
-def _hash(s):
-    return hashlib.sha256((s or "").encode()).hexdigest()
 
 
-def _snapshot_path(project, iid):
-    return home() / "state" / f"{_key(project, iid)}.snapshot.json"
 
 
-def save_snapshot(project, iid, drafts, before_ids, summary_id=None, model=None):
-    """Job-owned: the drafts this run created (and the human drafts that were there before)."""
-    before = [str(i) for i in before_ids]
-    ids = {}
-    for d in drafts:
-        pos = d.get("position") or {}
-        ids[str(d["id"])] = {"hash": _hash(d.get("note")), "body": d.get("note") or "",
-                             "path": pos.get("new_path"), "line": pos.get("new_line"),
-                             "summary": str(d["id"]) == str(summary_id)}
-    write_snapshot(project, iid, {"ids": ids, "before": [i for i in before if i not in ids], "model": model})
 
 
-def write_snapshot(project, iid, snap):
-    _atomic_write(_snapshot_path(project, iid), json.dumps(snap))
 
 
-def load_snapshot(project, iid):
-    p = _snapshot_path(project, iid)
-    return json.loads(p.read_text()) if p.exists() else None
 
 
-def drop_snapshot(project, iid):
-    _snapshot_path(project, iid).unlink(missing_ok=True)
 
 
-def _lessons_path(project):
-    return home() / "lessons" / f"{project.replace('/', '__')}.jsonl"
 
 
-LESSONS_IN_PACKET = 10
 
 
-def _all_lessons(project):
-    p = _lessons_path(project)
-    return [json.loads(line)["text"] for line in p.read_text().splitlines() if line.strip()] if p.exists() else []
 
 
-def load_lessons(project, limit=LESSONS_IN_PACKET):
-    return _all_lessons(project)[-limit:]
 
 
-def list_lessons(project=None):
-    """{project: [{n, text, used}]}; `used` = among the last LESSONS_IN_PACKET, i.e. sent with every review."""
-    d = home() / "lessons"
-    names = [project.lower()] if project else sorted(p.stem.replace("__", "/") for p in d.glob("*.jsonl")) if d.exists() else []
-    out = {}
-    for name in names:
-        texts = _all_lessons(name)
-        out[name] = [{"n": i, "text": t, "used": i > len(texts) - LESSONS_IN_PACKET} for i, t in enumerate(texts, 1)]
-    return out
 
 
-def forget_lessons(project, numbers=None):
-    """Remove lessons by their `list` number, or all of them (numbers=None). -> how many were removed."""
-    texts = _all_lessons(project)
-    drop = set(range(1, len(texts) + 1)) if numbers is None else set(numbers)
-    bad = sorted(n for n in drop if not 1 <= n <= len(texts))
-    if bad:
-        raise ValueError(f"no lesson number {bad} in {project} (it has {len(texts)})")
-    keep = [t for i, t in enumerate(texts, 1) if i not in drop]
-    _atomic_write(_lessons_path(project), "".join(json.dumps({"text": t}, ensure_ascii=False) + "\n" for t in keep))
-    return len(texts) - len(keep)
 
 
 TAG_RE = re.compile(r"\n\n🤖 _wiz-review · .*_\s*$")  # the attribution line agent_tag() appends
@@ -521,127 +473,32 @@ TAG_RE = re.compile(r"\n\n🤖 _wiz-review · .*_\s*$")  # the attribution line 
 
 
 
-def add_rule(project, text):
-    """An explicit lesson, written by the reviewer: deleting a draft never creates one."""
-    text = text.strip()
-    if len(text) > 500:
-        raise ValueError(f"too long ({len(text)} characters, max 500)")
-    if find_secrets(text):
-        raise ValueError("looks like it contains a secret: not saved")
-    add_lessons(project.lower(), [text])
 
 
-def add_lessons(project, texts):
-    if not texts:
-        return
-    p = _lessons_path(project)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
-        for t in texts:
-            f.write(json.dumps({"text": t[:500]}, ensure_ascii=False) + "\n")
 
 
-# --- reviewer history: what this person wrote and flagged before (sent as examples of taste) ----------
 
-HISTORY_CAP, HISTORY_COMMITS, HISTORY_MIN_CHARS = 300, 15, 20
-
-
-def _history_path(project):
-    return home() / "history" / f"{project.lower().replace('/', '__')}.jsonl"
+HISTORY_COMMITS = 15  # your recent commits to the changed files that go into the packet
 
 
-def load_history(project):
-    p = _history_path(project)
-    out = []
-    for line in (p.read_text().splitlines() if p.exists() else []):
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue  # a torn line must not lose the rest
-    return out
 
 
-def _hkey(r):
-    return (r.get("kind"), r.get("path"), _flat(r.get("before"), 500), _flat(r.get("body") or r.get("after"), 500))
 
 
-def add_history(project, recs):
-    """Append the reviewer's comments ({id, path, line, body, at}) -> how many were new.
-    The same comment can arrive from the human close, so it is dropped when its
-    note id, or its (path, text), is already there. Only the newest HISTORY_CAP are kept."""
-    old = load_history(project)
-    ids = {r["id"] for r in old if r.get("id")}
-    seen = {_hkey(r) for r in old}
-    new = []
-    for r in recs:
-        if r.get("kind") == "edit":  # {before, after}: the agent's draft and what the reviewer made of it
-            before, after = (TAG_RE.sub("", r.get(k) or "").strip()[:500] for k in ("before", "after"))
-            r = {**r, "before": before, "after": after}
-            ok = len(after) >= HISTORY_MIN_CHARS and before
-        else:
-            body = TAG_RE.sub("", r.get("body") or "").strip()[:500]
-            r = {**r, "body": body}
-            ok = len(body) >= HISTORY_MIN_CHARS
-        key = _hkey(r)
-        if not ok or not r.get("path") or key in seen or (r.get("id") and r["id"] in ids):
-            continue
-        seen.add(key)
-        new.append(r)
-    if new:
-        keep = sorted(old + new, key=lambda r: (r.get("at") or "")[:19])[-HISTORY_CAP:]
-        _atomic_write(_history_path(project), "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep))
-    return len(new)
 
 
-def history_for(project, files, limit):
-    """Examples for the packet: comments on the changed files (newest first), then on files in the same directories."""
-    if limit <= 0:
-        return []
-    paths, dirs = set(files), {os.path.dirname(f) for f in files}
-    recs = sorted((r for r in load_history(project) if r.get("kind") != "edit"),
-                  key=lambda r: (r.get("at") or "")[:19], reverse=True)
-    exact = [r for r in recs if r.get("path") in paths]
-    near = [r for r in recs if r.get("path") not in paths and os.path.dirname(r.get("path") or "") in dirs]
-    return [f"{r['path']}: {_flat(scrub(r['body']), 300)}" for r in (exact + near)[:limit]]
 
 
-EDITS_IN_PACKET = 3
 
 
-def edits_for(project, files, limit):
-    """Drafts this reviewer rewrote, on the changed files first, then the same directories: 'agent -> reviewer'."""
-    if limit <= 0:
-        return []
-    paths, dirs = set(files), {os.path.dirname(f) for f in files}
-    recs = sorted((r for r in load_history(project) if r.get("kind") == "edit"),
-                  key=lambda r: (r.get("at") or "")[:19], reverse=True)
-    exact = [r for r in recs if r.get("path") in paths]
-    near = [r for r in recs if r.get("path") not in paths and os.path.dirname(r.get("path") or "") in dirs]
-    return [f"{r['path']}: agent: {_flat(scrub(r['before']), 300)} -> reviewer: {_flat(scrub(r['after']), 300)}"
-            for r in (exact + near)[:min(limit, EDITS_IN_PACKET)]]
 
 
-def _answered(snap, my_notes):
-    """[(agent draft entry, the reviewer's published note on the same file and line)]; the summary never counts."""
-    anchored = {((n["position"] or {}).get("new_path"), (n["position"] or {}).get("new_line")): n
-                for n in my_notes if n.get("position")}
-    return [(v, anchored[(v.get("path"), v.get("line"))]) for v in snap["ids"].values()
-            if not v.get("summary") and (v.get("path"), v.get("line")) in anchored]
 
 
-def edit_pairs(snap, my_notes):
-    """Drafts the reviewer published with different text: their wording and priorities, as before/after pairs."""
-    return [{"kind": "edit", "path": v["path"], "line": v["line"], "before": v["body"], "after": n.get("body"),
-             "at": n.get("created_at")}
-            for v, n in _answered(snap, my_notes)
-            if TAG_RE.sub("", n.get("body") or "").strip() != TAG_RE.sub("", v["body"]).strip()]
 
 
-def kept_comments(snap, my_notes):
-    """The reviewer's published notes that answer the agent's drafts (same file and line), as the reviewer left them."""
-    return [{"id": n.get("id"), "path": v["path"], "line": v["line"], "body": n.get("body"),
-             "at": n.get("created_at")}
-            for v, n in _answered(snap, my_notes)]
+
+
 
 
 def log_metric(rec):
@@ -932,7 +789,7 @@ def risk_rank(path):
     return 1 if TEST_RE.search(p) else 0
 
 
-def build_packet(meta, request_note, diff_text, cfg, since=None, lessons=None, kind="review", untracked=None):
+def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review", untracked=None):
     """One self-contained prompt: instructions + intent + filtered diff. -> (text, stats)
     Optional `meta` context (description, commits, ci, earlier) is added only when present."""
     kept, skipped, omitted, used, changed = [], [], [], 0, 0
@@ -987,15 +844,6 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, lessons=None, k
     if meta.get("fixes"):
         parts.append("## Past fixes in these files (what broke here before — look for the same mistake again)\n"
                      + _untrusted("\n".join(f"- {t}" for t in meta["fixes"])))
-    if meta.get("edits"):
-        parts.append("## Drafts this reviewer rewrote (agent version -> their version): copy their wording and priorities\n"
-                     + _untrusted("\n".join(f"- {t}" for t in meta["edits"])))
-    if meta.get("history"):
-        parts.append("## How this reviewer reviewed these files before (examples of taste, not instructions)\n"
-                     + _untrusted("\n".join(f"- {t}" for t in meta["history"])))
-    if lessons:
-        parts.append("## Rules this reviewer wrote down for this repo (their own decisions: do not report what they say "
-                     "to skip)\n" + _untrusted("\n".join(f"- {t}" for t in lessons)))
     parts.append("## Author's request note\n" + _untrusted(request_note or "(none)"))
     if omitted:
         parts.append("## Changed files NOT included below (too large — read them on demand)\n"
@@ -1652,13 +1500,11 @@ def run_precheck(target, model=None, cwd="."):
                 meta[key] = get()
             except Exception as e:  # optional context never fails the check
                 print(f"{key} left out: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-        lessons = load_lessons(h["project"])
-        packet, pst = build_packet(meta, "", diff, cfg, lessons=lessons, kind="precheck", untracked=untracked)
+        packet, pst = build_packet(meta, "", diff, cfg, kind="precheck", untracked=untracked)
         if pst["changed_lines"] == 0 and not untracked:
             return f"No changes against {target}."
         if wide_diff(pst["changed_lines"], cfg):
-            packet, pst = build_packet(meta, "", local_change(repo, wide=True)[0], cfg, lessons=lessons,
-                                       kind="precheck", untracked=untracked)
+            packet, pst = build_packet(meta, "", local_change(repo, wide=True)[0], cfg, kind="precheck", untracked=untracked)
         used = model or cfg.get("model")
         proc = subprocess.run(review_cmd("precheck", used, cfg), input=packet, cwd=repo,
                               capture_output=True, text=True, timeout=cfg["review_timeout_min"] * 60)
@@ -1749,16 +1595,11 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
     action = reviewer_decide(data)
     ms = parse_markers(notes)
     ready = _last(ms, me, {"drafts-ready"})
-    snap = load_snapshot(project, iid)
 
-    if ready and _last(ms, me, {"done"}, after=ready.at) is None and snap:  # drafts are waiting for the human
-        cur = gl.drafts(project, iid)
-        if not set(snap["ids"]) & {str(d["id"]) for d in cur}:  # reviewer published/deleted them by hand
-            mine = [n for n in notes if _user(n["author"]) == me]
-            add_history(project, kept_comments(snap, mine) + edit_pairs(snap, mine))
-            gl.post_note(project, iid, f"<!-- wiz-review:done sha={ready.sha} -->\n✅ @{me}: рев'юер опрацював чернетки.")
-            drop_snapshot(project, iid)
-            return "closed"
+    if ready and _last(ms, me, {"done"}, after=ready.at) is None and not gl.drafts(project, iid):
+        # the reviewer published or deleted every draft by hand: the round is closed
+        gl.post_note(project, iid, f"<!-- wiz-review:done sha={ready.sha} -->\n✅ @{me}: рев'юер опрацював чернетки.")
+        return "closed"
 
     if action in ("review", "retry", "rerun"):
         repo = find_repo(project, cfg, ctx)
@@ -1773,9 +1614,7 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
         since = out.sha if action == "rerun" and out else None
         if since and since == info["sha"]:  # rerun asked but nothing new: answer without spending tokens
             _pickup(gl, info, me, cfg=cfg)
-            gl.post_note(project, iid, f"<!-- wiz-review:done sha={since} -->\n✅ @{me}: нових комітів немає — рев'ю актуальне."
-                         + (" Неопубліковані чернетки лишаються за рев'юером, автопублікації не буде." if snap else ""))
-            drop_snapshot(project, iid)  # `done` closes the round: its drafts are the human's from now on
+            gl.post_note(project, iid, f"<!-- wiz-review:done sha={since} -->\n✅ @{me}: нових комітів немає — рев'ю актуальне.")
             return "rerun-noop"
         extra = ""
         if action != "retry":  # a retry is a review that already started: the gate was passed
@@ -1890,7 +1729,6 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
         _todo(gl, project, iid)
         notify(f"Авто-рев'ю готове: {project}!{iid}", sound=True)
         return 0
-    before = [str(d["id"]) for d in gl.drafts(project, iid)]
     inline, summary = plan_notes(findings, diffmap, refs, cfg)
     created, failed = [], []
 
@@ -1932,7 +1770,6 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
         if not stored:
             rollback()
             raise
-    save_snapshot(project, iid, created, before, summary_id=summary_draft["id"], model=agent.get("model"))
     _todo(gl, project, iid)
     notify(f"Чернетки рев'ю готові: {project}!{iid} ({len(created)})", sound=True)
     counts = {}
@@ -2001,7 +1838,7 @@ class DryRunGitLab:
 
 @contextlib.contextmanager
 def dry_home():
-    """A throwaway copy of ~/.wiz-review: real settings, token, lessons and state are read; nothing real changes."""
+    """A throwaway copy of ~/.wiz-review: real settings, token and state are read; nothing real changes."""
     real, old = home(), os.environ.get("WIZ_REVIEW_HOME")
     with tempfile.TemporaryDirectory(prefix="wiz-review-dry-") as d:  # mode 0700: the token copy stays private
         if real.exists():
@@ -2097,14 +1934,14 @@ def ci_summary(gl, project, mr, head_sha):
     return scrub("\n".join(lines), [getattr(gl, "_token", None)])
 
 
-def already_raised(discussions, snap):
-    """Open human threads and the agent's still-pending drafts: what a review must not repeat."""
+def already_raised(discussions, drafts):
+    """Open human threads and the reviewer's pending drafts: what a review must not repeat."""
     def loc(path, line):
         return f"{path}:{line}" if path else "general"
     out = [f"{loc(t['path'], t['line'])} — {_flat(TAG_RE.sub('', t['body']))} (by {t['author']})"
            for t in thread_summary(discussions)]
-    out += [f"{loc(v.get('path'), v.get('line'))} — {_flat(TAG_RE.sub('', v['body']))} (pending draft)"
-            for v in (snap or {}).get("ids", {}).values() if not v.get("summary")]
+    out += [f"{loc((d.get('position') or {}).get('new_path'), (d.get('position') or {}).get('new_line'))} — "
+            f"{_flat(TAG_RE.sub('', d.get('note') or ''))} (pending draft)" for d in drafts or []]
     return out[:MAX_RAISED]
 
 
@@ -2115,7 +1952,7 @@ def packet_context(gl, project, iid, mr, repo, base, head_sha):
         ctx["description"] = mr["description"].strip()[:4000]
     pieces = (("commits", lambda: "\n".join([ln[:200] for ln in _git_out(log_args(iid, base), repo).splitlines()
                                              if ln.strip()][:MAX_COMMIT_LINES])),
-              ("earlier", lambda: already_raised(gl.discussions(project, iid), load_snapshot(project, iid))),
+              ("earlier", lambda: already_raised(gl.discussions(project, iid), gl.drafts(project, iid))),
               ("ci", lambda: ci_summary(gl, project, mr, head_sha)))
     for key, get in pieces:
         try:
@@ -2164,9 +2001,7 @@ def reviewer_context(project, repo, base, diff, cfg, kind):
                         scrub(ln[:200]) for ln in _git_out(
                             ["git", "--literal-pathspecs", "log", f"--author={email}", "--fixed-strings", "--no-merges",
                              "--format=%s", "-n", str(HISTORY_COMMITS), _check(SHA_RE, base, "sha"), "--", *names],
-                            repo).splitlines() if ln.strip())) if email and names else []),
-                   ("edits", lambda: edits_for(project, names, cfg["history_in_packet"])),
-                   ("history", lambda: history_for(project, names, max(cfg["history_in_packet"] - len(ctx.get("edits", [])), 0)))]  # edits share the budget
+                            repo).splitlines() if ln.strip())) if email and names else [])]
     for key, get in pieces:
         try:
             v = get()
@@ -2275,10 +2110,10 @@ def review_packet(gl, job, mr, refs, cfg, repo):
             meta["fixes"] = fixes
     if job["kind"] == "review":
         meta.update(rctx)
-    packet, pst = build_packet(meta, req, shown, cfg, since, load_lessons(project), job["kind"])
+    packet, pst = build_packet(meta, req, shown, cfg, since, job["kind"])
     if wide_diff(pst["changed_lines"], cfg):  # same changes, whole functions around them (anchors use `full`)
         packet, pst = build_packet(meta, req, _git_out(diff_args(iid, since or refs["base_sha"], wide=True), repo),
-                                   cfg, since, load_lessons(project), job["kind"])
+                                   cfg, since, job["kind"])
     return {"packet": packet, "pst": pst, "meta": meta, "full": full}
 
 
@@ -2386,7 +2221,7 @@ def _publish_agent(findings):
 
 
 def publish_findings(gl, url, findings, cfg=None):
-    """`publish-findings`: the findings you approved become DRAFT notes. No review note, no snapshot:
+    """`publish-findings`: the findings you approved become DRAFT notes. No review note:
     you still publish or delete each one in GitLab. The same schema, scrubbing and tag as a background review."""
     project, iid = _parse_url(url)
     cfg = cfg or load_config()
@@ -2583,12 +2418,6 @@ def main(argv=None):
     sub.add_parser("here")
     g = sub.add_parser("suggest")
     g.add_argument("--target", required=True)
-    g = sub.add_parser("lessons")
-    g.add_argument("action", choices=["list", "add", "forget"])
-    g.add_argument("--project")
-    g.add_argument("--text", help="the rule to add, in the reviewer's words (max 500 characters)")
-    g.add_argument("--n", type=int, action="append", help="lesson number from `lessons list` (repeatable)")
-    g.add_argument("--all", action="store_true")
     g = sub.add_parser("mr-context", help="review-with-me: what a review reads, as JSON; calls no model, posts nothing")
     g.add_argument("--url", required=True)
     g = sub.add_parser("publish-findings", help="review-with-me: approved findings become draft notes, never published")
@@ -2697,27 +2526,6 @@ def main(argv=None):
         print(json.dumps(here()))
     elif a.cmd == "suggest":
         print(json.dumps(suggest_reviewers(here()["repo"], a.target), ensure_ascii=False, indent=2))
-    elif a.cmd == "lessons":
-        if a.action == "list":
-            print(json.dumps(list_lessons(a.project), ensure_ascii=False, indent=2))
-            return 0
-        if a.action == "add":
-            if not a.project or not (a.text or "").strip():
-                raise SystemExit("lessons add needs --project and --text")
-            try:
-                add_rule(a.project, a.text)
-            except ValueError as e:
-                print(f"error: {e}", file=sys.stderr)
-                return 1
-            print("added")
-            return 0
-        if not a.project or not (a.n or a.all):
-            raise SystemExit("lessons forget needs --project and either --n <number> (repeatable) or --all")
-        try:
-            print(f"removed {forget_lessons(a.project, None if a.all else a.n)}")
-        except ValueError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 1
     elif a.cmd == "precheck":
         print(run_precheck(a.target, a.model))
     elif a.cmd == "login":

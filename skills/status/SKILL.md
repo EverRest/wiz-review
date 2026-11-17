@@ -11,5 +11,4 @@ description: Use when the user asks whether wiz-review works, what it costs, or 
    - `~/.wiz-review/logs/<project with / replaced by __>__<iid>.log`
    - `~/.wiz-review/logs/tick.log`
 4. If the user asks why a review did or did not do something, run `WR tick --dry-run`. It shows the decisions and writes nothing.
-5. If the user says the reviews stopped flagging a real kind of problem, run `WR lessons list --project <project>`. Show the lessons with `used: true`. Offer `WR lessons forget --project <project> --n <number>` for a wrong one, after the user approves. To make a new rule (for example "do not flag X in this repo"), offer `WR lessons add --project <project> --text "<the user's own words>"`, after the user approves the exact text. Deleting a draft never creates a rule.
-6. Summarize in a few lines. For each ❌, give the one command that fixes it.
+5. Summarize in a few lines. For each ❌, give the one command that fixes it.

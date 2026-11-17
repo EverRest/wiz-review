@@ -92,7 +92,7 @@ python3 "$(find ~/.claude/plugins -name wiz_review.py | head -1)" config set mod
 | `max_diff_lines` | `3000` | Diff lines sent in the packet; the rest is read on demand. |
 | `small_diff_lines` | `60` | Diffs up to this size get whole functions as context. |
 | `fix_history` | `true` | Past fix commits to the same files go into the packet. |
-| `history_in_packet` | `10` | Your own earlier comments and commits as examples of your taste; `0` = off. |
+| `history_in_packet` | `10` | Your recent commits to the changed files go into the packet as context; `0` = off. |
 | `exclude` | `[]` | Extra glob patterns of files not to review, for example `["*.generated.md"]`. |
 | `comment_language` | `uk` | `uk` or `en`: the plugin's own texts and the language of the findings. |
 | `notify` | `true` | Desktop notification. |
@@ -118,7 +118,6 @@ Lists and numbers take JSON, for example `config set exclude '["*.snap"]'`.
 | `WR config set <key> <value>` | Change a setting (see above). |
 | `WR repos --root <folder>` | Set and rescan the clone folders. |
 | `WR schedule [--install \| --remove]` | Show, install, or remove the background run. |
-| `WR lessons add --project <p> --text "…"` | Save a rule for a repo in your own words. `lessons list` and `lessons forget` manage them. |
 | `WR login` | Save or replace the token. |
 
 ## If something goes wrong
@@ -133,9 +132,8 @@ Run `/wiz-review:status`. Each ❌ has a hint.
 | The review does not start | (1) The author ran `/request-review`, not only assigned you. (2) The MR is not Draft. (3) You are in Reviewers. (4) `doctor` shows no ❌. (5) The background run is installed: `launchctl print gui/$(id -u)/com.wiz-team.wiz-review`. (6) Log: `~/.wiz-review/logs/tick.log`. |
 | MR note "⚠️ wiz-review failed" | The note gives the cause. Details: `~/.wiz-review/logs/<project>__<MR>.log`. The plugin retries once. |
 | A review does something unexpected | `WR tick --dry-run` or `WR review --url <MR> --dry-run`. Neither writes to GitLab. |
-| The reviews keep missing a kind of problem | A lesson may teach the model to stay quiet. `WR lessons list`, then `WR lessons forget`. |
 
-Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl`, `config.json`, `repos.json`, `token`, `state/`, `lessons/`, `history/`.
+Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl`, `config.json`, `repos.json`, `token`, `state/`.
 
 ## Security and privacy
 
@@ -143,7 +141,6 @@ Logs and data are in `~/.wiz-review/`: `logs/`, `metrics.jsonl`, `config.json`, 
 - **Claude in a review** runs with `--restricted`: it reads only your clone and cannot use your settings, plugins, hooks, or MCP servers.
 - **MR content** (diff, description, comments, file names) is untrusted data for Claude, never instructions.
 - **Before publishing**, the output is checked for tokens, keys, and secrets. If one is found, nothing is published.
-- **Your history** (`~/.wiz-review/history/`) holds your own comments and the drafts you rewrote. It goes to Claude for reviews in the same project, scrubbed for secrets.
 - **Code** goes to Claude (Anthropic), the same way as in any Claude Code session.
 - The plugin never changes your clone's working tree or branch.
 
