@@ -784,8 +784,9 @@ def extract_findings(stdout, repo=None):
 
 def claude_pass(kind, model, cfg, repo, packet):
     """One headless Claude run on a packet -> (findings, meta). ValueError when the output is unusable."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GITLAB_PERSONAL_ACCESS_TOKEN", "GITLAB_TOKEN")}
     proc = subprocess.run(review_cmd(kind, model, cfg), input=packet, cwd=repo, capture_output=True,
-                          text=True, timeout=cfg["review_timeout_min"] * 60)
+                          text=True, timeout=cfg["review_timeout_min"] * 60, env=env)
     try:
         return extract_findings(proc.stdout, repo)
     except ValueError as e:

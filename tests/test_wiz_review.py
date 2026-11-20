@@ -1813,3 +1813,21 @@ class TeamGitLabTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeChildEnvTests(unittest.TestCase):  # the review's claude child must not inherit the GitLab token
+    def test_child_claude_gets_no_gitlab_token(self):
+        seen = {}
+
+        def spy(args, **kw):
+            seen["env"] = kw.get("env")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        env = {"PATH": os.environ.get("PATH", ""), "GITLAB_PERSONAL_ACCESS_TOKEN": "glpat-test",
+               "GITLAB_TOKEN": "glpat-test-2", "ANTHROPIC_API_KEY": "sk-test"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(wr.subprocess, "run", spy):
+            with self.assertRaises(ValueError):  # empty stdout is not a findings file; the env is what matters
+                wr.claude_pass("review", None, {"review_timeout_min": 1}, ".", "packet")
+        self.assertIsNotNone(seen["env"], "claude child must get an explicit env, not inherit all of os.environ")
+        self.assertNotIn("GITLAB_PERSONAL_ACCESS_TOKEN", seen["env"])
+        self.assertNotIn("GITLAB_TOKEN", seen["env"])
+        self.assertEqual(seen["env"]["ANTHROPIC_API_KEY"], "sk-test")
