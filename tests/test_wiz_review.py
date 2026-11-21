@@ -365,7 +365,11 @@ class FindingsTests(unittest.TestCase):
     def test_extract_from_fenced_json_in_result(self):
         inner = json.dumps({"summary": "s", "findings": []})
         out = json.dumps({"result": f"Here:\n```json\n{inner}\n```"})
-        self.assertEqual(wr.extract_findings(out)[0], {"summary": "s", "findings": []})
+        self.assertEqual(wr.extract_findings(out)[0], {"summary": "s", "findings": [], "fixed_threads": []})
+
+    def test_extract_keeps_only_well_formed_thread_ids(self):
+        out = json.dumps({"structured_output": {"summary": "s", "findings": [], "fixed_threads": ["abc12345", "x; rm", 7]}})
+        self.assertEqual(wr.extract_findings(out)[0]["fixed_threads"], ["abc12345"])
 
     def test_extract_rejects_garbage(self):
         for bad in ("not json", json.dumps({"result": "no findings here"})):
@@ -1078,6 +1082,21 @@ class FinishTests(TempHome):
                       wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
         self.assertEqual([d["id"] for d in gl.draft_list], [5])
         self.assertNotIn(5, gl.published)
+
+    def test_rereview_resolves_only_real_open_threads_the_model_named(self):
+        gl = FakeGL()
+        thread = lambda i, resolved: {"id": i, "notes": [{"author": {"username": "x"}, "body": "b", "resolvable": True,
+                                                          "resolved": resolved}]}
+        gl.discussions = lambda p, i: [thread("aaaaaaaa", False), thread("bbbbbbbb", True)]
+        done = []
+        gl.resolve = lambda p, i, d: done.append(d)
+        fs = {"summary": "s", "findings": [], "fixed_threads": ["aaaaaaaa", "bbbbbbbb", "cccccccc"]}
+        wr.finish_job(gl, {**self.JOB, "since": "def456"}, fs, wr.parse_diff(DIFF), REFS, wr.DEFAULTS,
+                      notify=lambda m, sound=False: None)
+        self.assertEqual(done, ["aaaaaaaa"])  # resolved and made-up ids are ignored
+        done.clear()
+        wr.finish_job(gl, self.JOB, fs, wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
+        self.assertEqual(done, [])  # first review: nothing to close
 
     def test_failed_publish_leaves_drafts_for_the_reviewer(self):
         gl = FakeGL()
