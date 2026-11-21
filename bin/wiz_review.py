@@ -1060,9 +1060,6 @@ class GitLab:
     def delete_draft(self, project, iid, draft_id):
         self._req("DELETE", self._mrp(project, iid) + f"/draft_notes/{int(draft_id)}")
 
-    def publish_all(self, project, iid):
-        self._req("POST", self._mrp(project, iid) + "/draft_notes/bulk_publish")
-
     def publish_draft(self, project, iid, draft_id):
         self._req("PUT", self._mrp(project, iid) + f"/draft_notes/{int(draft_id)}/publish")
 
@@ -1417,7 +1414,8 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
     published = False
     if cfg.get("auto_publish", True):
         try:
-            gl.publish_all(project, iid)
+            for d in created:  # not bulk_publish: it would also publish the reviewer's own hand-written drafts
+                gl.publish_draft(project, iid, d["id"])
             published = True
         except Exception:  # drafts stay in GitLab: fall back to "drafts ready" so the reviewer can publish them
             pass

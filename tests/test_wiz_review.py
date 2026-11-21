@@ -691,10 +691,6 @@ class FakeGL:
         self.created.append(d)
         return d
 
-    def publish_all(self, project, iid):
-        self.published += [d["id"] for d in self.draft_list]
-        self.draft_list = []
-
     def publish_draft(self, project, iid, draft_id):
         self.published.append(draft_id)
         self.draft_list = [d for d in self.draft_list if d["id"] != draft_id]
@@ -1075,9 +1071,17 @@ class FinishTests(TempHome):
         self.assertFalse(any("drafts-ready" in b for b in gl.posted))
         self.assertFalse(hasattr(gl, "todos"))
 
+    def test_auto_publish_keeps_the_reviewers_own_drafts(self):
+        gl = FakeGL()
+        gl.draft_list = [{"id": 5, "note": "my own draft", "position": None}]
+        wr.finish_job(gl, self.JOB, {"summary": "s", "findings": [finding()]},
+                      wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
+        self.assertEqual([d["id"] for d in gl.draft_list], [5])
+        self.assertNotIn(5, gl.published)
+
     def test_failed_publish_leaves_drafts_for_the_reviewer(self):
         gl = FakeGL()
-        gl.publish_all = lambda p, i: (_ for _ in ()).throw(wr.GitLabError("500"))
+        gl.publish_draft = lambda p, i, d: (_ for _ in ()).throw(wr.GitLabError("500"))
         wr.finish_job(gl, self.JOB, {"summary": "s", "findings": [finding()]},
                       wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
         self.assertEqual(len(gl.draft_list), 2)

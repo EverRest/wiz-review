@@ -201,11 +201,6 @@ class FakeGitLab:
         if one and method == "DELETE":
             self.drafts[key] = [d for d in self.drafts.get(key, []) if not (d["id"] == int(one.group(1)) and d["author"] == user)]
             return 200, {}, {}  # real GitLab: 204; a body-less 204 isn't worth the handler special case
-        if rest == "draft_notes/bulk_publish" and method == "POST":
-            for d in [d for d in self.drafts.get(key, []) if d["author"] == user]:
-                self.drafts[key].remove(d)
-                self.add_note(key, user, d["note"], d["position"])
-            return 204, {}, {}
         pub = re.match(r"^draft_notes/(\d+)/publish$", rest or "")
         if pub and method == "PUT":
             draft = next(d for d in self.drafts[key] if d["id"] == int(pub.group(1)) and d["author"] == user)

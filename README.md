@@ -89,6 +89,7 @@ python3 "$(find ~/.claude/plugins -name wiz_review.py | head -1)" config set mod
 | `max_diff_lines` | `3000` | Diff lines sent in the packet; the rest is read on demand. |
 | `history_in_packet` | `10` | Your recent commits to the changed files go into the packet as context; `0` = off. |
 | `exclude` | `[]` | Extra glob patterns of files not to review, for example `["*.generated.md"]`. |
+| `interval_sec` | `120` | Tick period in seconds (minimum 30). The scheduler stores it at install, so run the setup install step again after you change it. |
 | `notify` | `true` | Desktop notification. |
 | `auto_publish` | `true` | Publish the review at once. `false` = leave drafts in GitLab for you to check and publish. |
 | `roots` | `["~/code"]` | Folders where your clones live. |
