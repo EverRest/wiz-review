@@ -607,6 +607,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
+        "fixed_threads": {"type": "array", "items": {"type": "string"}},
         "findings": {"type": "array", "items": {
             "type": "object",
             "properties": {
@@ -669,7 +670,8 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review"):
         parts.append("## Commits in the reviewed range\n" + _untrusted(meta["commits"]))
     if meta.get("earlier"):
         parts.append("## Already raised (open threads and pending drafts) — do not report these again"
-                     + ("; in the summary, say which of them the new commits fix" if since else "")
+                     + ("; in the summary, say which of them the new commits fix. Put the id (the hex in square brackets) of every "
+                        "open thread that the new commits clearly fix in `fixed_threads`. Leave out any thread you are not sure about" if since else "")
                      + "\n" + _untrusted("\n".join(f"- {t}" for t in meta["earlier"])))
     if meta.get("my_commits"):
         parts.append("## Recent commits by this reviewer to these files (their own work in this area; context only)\n"
@@ -778,7 +780,8 @@ def extract_findings(stdout, repo=None):
     cost = outer.get("total_cost_usd")
     if cost is None and usage:
         cost = sum((u.get("costUSD") or 0) for u in usage.values())
-    return ({"summary": obj["summary"], "findings": clean},
+    fixed = [t for t in obj.get("fixed_threads") or [] if isinstance(t, str) and re.fullmatch(r"[0-9a-f]{8,64}", t)]
+    return ({"summary": obj["summary"], "findings": clean, "fixed_threads": fixed},
             {"cost_usd": cost, "turns": outer.get("num_turns"), "dropped": dropped, "model": model,
              "tokens_in": tin, "tokens_out": tout})
 
@@ -1438,6 +1441,14 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
             else:
                 rollback()
                 raise
+    if published and job.get("since"):  # re-review: close the open threads (human or plugin) that the new commits fix
+        try:
+            open_ids = {t["id"] for t in thread_summary(gl.discussions(project, iid))}  # a made-up id never matches
+            for tid in findings.get("fixed_threads", []):
+                if tid in open_ids:
+                    gl.resolve(project, iid, tid)
+        except Exception:  # best effort: an unresolved thread is harmless, a failed job would repeat the review
+            pass
     if published:
         notify(f"Review published: {project}!{iid} ({len(created)})", sound=True)
         return len(created)
@@ -1513,7 +1524,7 @@ def already_raised(discussions, drafts):
     """Open human threads and the reviewer's pending drafts: what a review must not repeat."""
     def loc(path, line):
         return f"{path}:{line}" if path else "general"
-    out = [f"{loc(t['path'], t['line'])} — {_flat(TAG_RE.sub('', t['body']))} (by {t['author']})"
+    out = [f"[{t['id']}] {loc(t['path'], t['line'])} — {_flat(TAG_RE.sub('', t['body']))} (by {t['author']})"
            for t in thread_summary(discussions)]
     out += [f"{loc((d.get('position') or {}).get('new_path'), (d.get('position') or {}).get('new_line'))} — "
             f"{_flat(TAG_RE.sub('', d.get('note') or ''))} (pending draft)" for d in drafts or []]
