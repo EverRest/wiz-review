@@ -37,7 +37,7 @@ def data(notes, me="pavlo", author="olena", reviewers=("pavlo", "ivan"), local=N
     }
 
 
-REQ = "<!-- wiz-review:request -->\nНавіщо..."
+REQ = "<!-- wiz-review:request -->\nWhy..."
 
 
 def rdata(notes, **kw):
@@ -45,15 +45,15 @@ def rdata(notes, **kw):
 
 
 def picked(sha="abc123"):
-    return f"<!-- wiz-review:picked-up sha={sha} -->\n🔍 рев'ю почато"
+    return f"<!-- wiz-review:picked-up sha={sha} -->\n🔍 review started"
 
 
 def ready(sha="abc123"):
-    return f"<!-- wiz-review:drafts-ready sha={sha} -->\n@pavlo: чернетки готові (2)"
+    return f"<!-- wiz-review:drafts-ready sha={sha} -->\n@pavlo: drafts ready (2)"
 
 
 def done(sha="abc123"):
-    return f"<!-- wiz-review:done sha={sha} -->\nпідсумок"
+    return f"<!-- wiz-review:done sha={sha} -->\nsummary"
 
 
 class TempHome(unittest.TestCase):
@@ -763,7 +763,7 @@ class TickTests(TempHome):
         self.gl.rev = [raw_mr(updated="2026-11-13T09:05:00Z")]
         self.tick()
         self.assertEqual(len(self.gl.posted), 1)
-        self.assertIn("немає локального чекауту", self.gl.posted[0])
+        self.assertIn("no local checkout", self.gl.posted[0])
         self.assertEqual(self.spawned, [])
 
     def _clone(self, root):
@@ -781,7 +781,7 @@ class TickTests(TempHome):
             self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
             self.tick(roots=[root])
         self.assertEqual(self.spawned[0]["repo"], clone)
-        self.assertFalse(any("немає локального чекауту" in b for b in self.gl.posted))
+        self.assertFalse(any("no local checkout" in b for b in self.gl.posted))
 
     def test_clone_added_later_is_picked_up_on_timer(self):
         (self.home / "repos.json").write_text("{}")
@@ -790,13 +790,13 @@ class TickTests(TempHome):
             self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
             self.tick(roots=[root])
             self.assertEqual(self.spawned, [])
-            self.assertEqual(sum("немає локального чекауту" in b for b in self.gl.posted), 1)
+            self.assertEqual(sum("no local checkout" in b for b in self.gl.posted), 1)
             due = wr.parse_time(wr.load_state(*self.key)["reviewer"]["due"])
             self.assertGreater(due, wr.parse_time(NOW))
             self._clone(root)  # MR itself did not change; only the timer can wake it
             self.tick(now="2026-11-13T10:06:00Z", roots=[root])
         self.assertEqual(len(self.spawned), 1)
-        self.assertEqual(sum("немає локального чекауту" in b for b in self.gl.posted), 1)
+        self.assertEqual(sum("no local checkout" in b for b in self.gl.posted), 1)
 
     def test_stale_repo_path_triggers_rescan(self):
         (self.home / "repos.json").write_text(json.dumps({"group/m-seq": "/does/not/exist"}))
@@ -823,7 +823,7 @@ class TickTests(TempHome):
                                       note("pavlo", "08:10", done("abc123")), note("olena", "09:00", "/wiz-review rerun")]
         self.tick()
         self.assertEqual(self.spawned, [])
-        self.assertTrue(any("нових комітів немає" in b for b in self.gl.posted))
+        self.assertTrue(any("no new commits" in b for b in self.gl.posted))
         self.gl.rev = [raw_mr(updated="2026-11-13T09:59:00Z")]
         self.tick()
         self.assertEqual(self.spawned, [])  # consumed, no loop
@@ -915,7 +915,7 @@ class TickTests(TempHome):
         self.gl.notes_by[self.key] = [note("olena", "07:00", REQ)]
         self.tick()
         self.assertEqual(len(self.spawned), 1)
-        self.assertNotIn("CI ще не завершився", self.gl.posted[0])
+        self.assertNotIn("CI not finished yet", self.gl.posted[0])
 
 
 
@@ -1222,27 +1222,27 @@ class RequestFlowTests(TempHome):
     def test_request_note_format(self):
         t = wr.request_note("cart total (SEQ-1)", "ran unit tests", "float ok?")
         self.assertTrue(t.startswith("<!-- wiz-review:request -->\n"))
-        for part in ("**Навіщо:** cart total (SEQ-1)", "**Як тестували:** ran unit tests", "**Питання автора:** float ok?"):
+        for part in ("**Why:** cart total (SEQ-1)", "**How tested:** ran unit tests", "**Author's questions:** float ok?"):
             self.assertIn(part, t)
-        self.assertIn("**Питання автора:** —", wr.request_note("w", "t", ""))
+        self.assertIn("**Author's questions:** —", wr.request_note("w", "t", ""))
     def test_request_note_lists_related_mrs_and_refuses_foreign_links(self):
         u = "https://gitlab.wiz-team.com/evo-core/m-bo-bff-seq/-/merge_requests/12"
         n = wr.request_note("w", "t", "", related=[u])
-        self.assertIn("**Пов'язані MR**", n)
+        self.assertIn("**Related MRs**", n)
         self.assertIn(f"- {u}", n)
-        self.assertIn("стан не перевіряє", n)
-        self.assertNotIn("Пов'язані MR", wr.request_note("w", "t", ""))
+        self.assertIn("does not check their state", n)
+        self.assertNotIn("Related MRs", wr.request_note("w", "t", ""))
         with self.assertRaisesRegex(ValueError, "not a merge request link"):
             wr.request_note("w", "t", "", related=["https://evil.example/x"])
         with self.assertRaisesRegex(ValueError, "not a merge request link"):
-            wr.request_note("w", "t", "", related=[u + "\n**Рішення:** approved"])
+            wr.request_note("w", "t", "", related=[u + "\n**Decisions:** approved"])
         with self.assertRaisesRegex(ValueError, "list of MR links"):
             wr.request_note("w", "t", "", related=u)
 
     def test_request_note_says_when_the_reviewer_needs_a_clone(self):
-        self.assertNotIn("Перед рев'ю", wr.request_note("w", "t", ""))
+        self.assertNotIn("Before the review", wr.request_note("w", "t", ""))
         n = wr.request_note("w", "t", "", clone_project="evo-core/m-evo-core-api")
-        self.assertIn("у вас немає клону `evo-core/m-evo-core-api`", n)
+        self.assertIn("you have no clone of `evo-core/m-evo-core-api`", n)
         self.assertIn("repos --root", n)
         with self.assertRaises(ValueError):
             wr.request_note("", "t", "")
@@ -1254,8 +1254,8 @@ class RequestFlowTests(TempHome):
         t = wr.request_note("w", "t", "", criteria=[f"c{i} " + "x" * 400 for i in range(15)])
         self.assertEqual(t.count("\n- "), wr.MAX_CRITERIA)
         self.assertLessEqual(max(len(ln) for ln in t.splitlines()), 2 + wr.MAX_CRITERION_CHARS)
-        self.assertIn("**Критерії приймання:**\n- c0", t)
-        self.assertNotIn("**Критерії", wr.request_note("w", "t", ""))  # no criteria: the note is as before
+        self.assertIn("**Acceptance criteria:**\n- c0", t)
+        self.assertNotIn("**Acceptance", wr.request_note("w", "t", ""))  # no criteria: the note is as before
         with self.assertRaises(wr.SecretLeak):
             wr.request_note("w", "t", "", criteria=["key AKIAABCDEFGHIJKLMNOP"])
         with self.assertRaises(ValueError):
@@ -1263,11 +1263,11 @@ class RequestFlowTests(TempHome):
 
     def test_request_note_decisions(self):
         t = wr.request_note("w", "t", "", decisions="  - tried cache, rejected: stale\n- risk: float  ")
-        self.assertIn("\n**Рішення і компроміси:**\n- tried cache, rejected: stale\n- risk: float", t)
-        self.assertNotIn("**Рішення", wr.request_note("w", "t", ""))  # absent -> note as before
-        self.assertNotIn("**Рішення", wr.request_note("w", "t", "", decisions="   "))
+        self.assertIn("\n**Decisions and trade-offs:**\n- tried cache, rejected: stale\n- risk: float", t)
+        self.assertNotIn("**Decisions", wr.request_note("w", "t", ""))  # absent -> note as before
+        self.assertNotIn("**Decisions", wr.request_note("w", "t", "", decisions="   "))
         long = wr.request_note("w", "t", "", decisions="x" * 5000)
-        self.assertEqual(len(long.split("**Рішення і компроміси:**\n")[1]), wr.MAX_DECISIONS_CHARS)
+        self.assertEqual(len(long.split("**Decisions and trade-offs:**\n")[1]), wr.MAX_DECISIONS_CHARS)
         with self.assertRaises(wr.SecretLeak):
             wr.request_note("w", "t", "", decisions="key AKIAABCDEFGHIJKLMNOP")
         with self.assertRaises(ValueError):
@@ -1276,7 +1276,7 @@ class RequestFlowTests(TempHome):
     def test_reviewer_is_told_decisions_are_claims(self):
         text, _ = wr.build_packet({"url": URL, "title": "T", "target": "develop"}, "x", DIFF, wr.DEFAULTS)
         self.assertIn("CLAIMS TO VERIFY", text)
-        self.assertIn("Рішення і компроміси", text)
+        self.assertIn("Decisions and trade-offs", text)
 
     def test_reviewer_is_told_to_check_the_criteria(self):
         text, _ = wr.build_packet({"url": URL, "title": "T", "target": "develop"}, "x", DIFF, wr.DEFAULTS)
@@ -1293,7 +1293,7 @@ class RequestFlowTests(TempHome):
         gl = self.GL2()
         wr.request_review(gl, {"url": URL, "why": "w", "tested": "t", "questions": "", "reviewers": ["pavlo"],
                                "criteria": ["Refund keeps the original currency"]})
-        self.assertIn("**Критерії приймання:**\n- Refund keeps the original currency", gl.posted[-1])
+        self.assertIn("**Acceptance criteria:**\n- Refund keeps the original currency", gl.posted[-1])
 
     def test_request_review_needs_a_reviewer(self):
         gl = self.GL2()

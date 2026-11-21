@@ -9,6 +9,8 @@ Do not put secrets in any text you write.
 Put free text only in JSON files. Write them with the Write tool to `~/.wiz-review/tmp/`.
 Do not pass free text through shell quoting.
 
+Write all free text in Simplified Technical English (STE).
+
 1. **Find the current branch.** Run `WR here`. It returns `{project, branch, repo}`.
    If the branch is not on the remote, ask the user before you push.
    Run `git push -u origin <branch>` only after the user approves.
