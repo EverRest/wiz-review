@@ -48,6 +48,12 @@ Author                          GitLab (MR)                       Reviewer
 4. **Setup wizard** in Claude Code: `/wiz-review:setup`. It asks which folders hold your clones and installs the background run.
 5. **Check:** `/wiz-review:status`. Everything should show ✅.
 
+## Update and versions
+
+Update with `/plugin update wiz-review`. Claude Code updates only when `version` in `.claude-plugin/plugin.json` changes, so every PR that changes behavior raises it.
+
+**0.13.0:** all texts are English (STE). Reviews publish by default; run `config set auto_publish false` to check drafts first. A re-review resolves the threads that the new commits fix.
+
 ## Using it
 
 **Author**

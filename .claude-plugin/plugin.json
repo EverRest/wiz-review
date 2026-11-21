@@ -1,6 +1,6 @@
 {
   "name": "wiz-review",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Peer-to-peer GitLab MR review: the author's agent requests review, the reviewer's own Claude reviews in their checkout and leaves draft notes.",
   "author": {
     "name": "Wiz-Team"
