@@ -460,12 +460,12 @@ class AlertTests(TempHome):
     def test_drafts_ready_creates_todo_for_the_reviewer_and_survives_failure(self):
         gl = FakeGL()
         wr.finish_job(gl, FinishTests.JOB, {"summary": "s", "findings": [finding()]}, wr.parse_diff(DIFF), REFS,
-                      wr.DEFAULTS, notify=lambda m, sound=False: None)
+                      DRAFTS, notify=lambda m, sound=False: None)
         self.assertEqual(gl.todos, [("pavlo", "group/m-seq", 142)])
         failing = FakeGL()
         failing.todo_fails = True
         wr.finish_job(failing, FinishTests.JOB, {"summary": "s", "findings": [finding()]}, wr.parse_diff(DIFF), REFS,
-                      wr.DEFAULTS, notify=lambda m, sound=False: None)
+                      DRAFTS, notify=lambda m, sound=False: None)
         self.assertTrue(failing.posted[-1].startswith("<!-- wiz-review:drafts-ready"))  # the review itself still lands
 
     def test_fallback_creates_todo_for_the_author(self):
@@ -656,6 +656,9 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(wr.token_source({}, cj), "mcp")
 
 
+DRAFTS = {**wr.DEFAULTS, "auto_publish": False}  # the reviewer checks the drafts
+
+
 class FakeGL:
     def __init__(self, me="pavlo"):
         self._me, self.rev, self.auth = me, [], []
@@ -687,6 +690,10 @@ class FakeGL:
         self.draft_list.append(d)
         self.created.append(d)
         return d
+
+    def publish_all(self, project, iid):
+        self.published += [d["id"] for d in self.draft_list]
+        self.draft_list = []
 
     def publish_draft(self, project, iid, draft_id):
         self.published.append(draft_id)
@@ -1020,20 +1027,20 @@ class FinishTests(TempHome):
         gl.post_note = timeout_after_save
         gl.delete_draft = lambda p, i, d: self.fail("must not roll back")
         wr.finish_job(gl, self.JOB, {"summary": "s", "findings": [finding()]},
-                      wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
+                      wr.parse_diff(DIFF), REFS, DRAFTS, notify=lambda m, sound=False: None)
 
     def test_earlier_rounds_identical_note_is_not_mistaken_for_ours(self):
         gl = FakeGL()
         fs = {"summary": "s", "findings": []}
         gl.post_note("group/m-seq", 142, "<!-- wiz-review:picked-up sha=abc123 -->\n🔍")
-        wr.finish_job(gl, self.JOB, fs, wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
+        wr.finish_job(gl, self.JOB, fs, wr.parse_diff(DIFF), REFS, DRAFTS, notify=lambda m, sound=False: None)
         gl.post_note("group/m-seq", 142, "<!-- wiz-review:picked-up sha=abc123 -->\n🔍")  # review-now again
         gl.post_note = lambda p, i, b: (_ for _ in ()).throw(wr.urllib.error.URLError("down"))  # not stored
         deleted = []
         gl.delete_draft = lambda p, i, d: deleted.append(d)
         gl.draft_list = []  # round 1 handled, so the second round has the same draft count
         with self.assertRaises(wr.urllib.error.URLError):
-            wr.finish_job(gl, self.JOB, fs, wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
+            wr.finish_job(gl, self.JOB, fs, wr.parse_diff(DIFF), REFS, DRAFTS, notify=lambda m, sound=False: None)
         self.assertEqual(len(deleted), 1)
 
 
@@ -1057,6 +1064,24 @@ class FinishTests(TempHome):
         self.assertEqual(len(gl.posted), 1)
         self.assertIn("boom", gl.posted[0])
         self.assertFalse(gl.posted[0].startswith("<!-- wiz-review:"))  # not a protocol marker
+
+    def test_auto_publish_posts_one_done_note_and_no_todo(self):
+        gl = FakeGL()
+        wr.finish_job(gl, self.JOB, {"summary": "s", "findings": [finding()]},
+                      wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
+        self.assertEqual(gl.draft_list, [])
+        self.assertEqual(len(gl.published), 2)  # inline + summary
+        self.assertTrue(gl.posted[-1].startswith("<!-- wiz-review:done sha="))
+        self.assertFalse(any("drafts-ready" in b for b in gl.posted))
+        self.assertFalse(hasattr(gl, "todos"))
+
+    def test_failed_publish_leaves_drafts_for_the_reviewer(self):
+        gl = FakeGL()
+        gl.publish_all = lambda p, i: (_ for _ in ()).throw(wr.GitLabError("500"))
+        wr.finish_job(gl, self.JOB, {"summary": "s", "findings": [finding()]},
+                      wr.parse_diff(DIFF), REFS, wr.DEFAULTS, notify=lambda m, sound=False: None)
+        self.assertEqual(len(gl.draft_list), 2)
+        self.assertTrue(gl.posted[-1].startswith("<!-- wiz-review:drafts-ready"))
 
     def test_finish_fallback_posts_plain_note(self):
         gl = FakeGL(me="olena")

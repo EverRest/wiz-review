@@ -80,7 +80,7 @@ class Machine:
         self.name, self.clone = name, clone
         self.home = tmp / f"home-{name}"
         self.home.mkdir()
-        (self.home / "config.json").write_text(json.dumps({"notify": False, "roots": []}))  # model: plugin default
+        (self.home / "config.json").write_text(json.dumps({"notify": False, "auto_publish": False, "roots": []}))  # model: plugin default
         (self.home / "repos.json").write_text(json.dumps({PROJECT: str(clone)}))
         self.env = {**os.environ, "WIZ_REVIEW_HOME": str(self.home), "GITLAB_PERSONAL_ACCESS_TOKEN": token,
                     "WIZ_REVIEW_GITLAB_HOST": gl.host, "WIZ_REVIEW_GITLAB_SCHEME": "http", "WIZ_REVIEW_FAST": "1"}

@@ -90,6 +90,7 @@ python3 "$(find ~/.claude/plugins -name wiz_review.py | head -1)" config set mod
 | `history_in_packet` | `10` | Your recent commits to the changed files go into the packet as context; `0` = off. |
 | `exclude` | `[]` | Extra glob patterns of files not to review, for example `["*.generated.md"]`. |
 | `notify` | `true` | Desktop notification. |
+| `auto_publish` | `true` | Publish the review at once. `false` = leave drafts in GitLab for you to check and publish. |
 | `roots` | `["~/code"]` | Folders where your clones live. |
 | `max_concurrent` | `2` | Parallel reviews on this machine. |
 

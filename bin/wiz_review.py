@@ -47,6 +47,7 @@ DEFAULTS = {
     "max_diff_lines": 3000,     # diff lines embedded in the packet; the rest is read on demand
     "max_inline": 20,           # inline drafts per review; overflow goes to the summary
     "notify": True,             # local desktop notification
+    "auto_publish": True,       # publish the review at once; False = leave drafts for the reviewer to check
     "exclude": [],              # extra glob patterns of files not worth reviewing
 }
 
@@ -269,7 +270,7 @@ def parse_config_value(key, raw):
         if v < INT_MIN[key]:
             raise SystemExit(f"{key} must be at least {INT_MIN[key]}")
         return v
-    if key == "notify":
+    if key in ("notify", "auto_publish"):
         if raw.lower() not in ("true", "false"):
             raise SystemExit(f"{key} must be true or false")
         return raw.lower() == "true"
@@ -1059,6 +1060,9 @@ class GitLab:
     def delete_draft(self, project, iid, draft_id):
         self._req("DELETE", self._mrp(project, iid) + f"/draft_notes/{int(draft_id)}")
 
+    def publish_all(self, project, iid):
+        self._req("POST", self._mrp(project, iid) + "/draft_notes/bulk_publish")
+
     def publish_draft(self, project, iid, draft_id):
         self._req("PUT", self._mrp(project, iid) + f"/draft_notes/{int(draft_id)}/publish")
 
@@ -1239,6 +1243,7 @@ MSG = {"pickup": "review started", "summary": "wiz-review summary",
            "fallback_failed": "⚠️ The fallback auto-review failed (`{msg}`). To retry, run `/wiz-review:request-review` again "
                               "(it starts a new cycle and, if needed, the fallback review).",
            "ready": "@{me}: review drafts are ready ({n}). Made by {tool} ({model}). Publish or edit them in GitLab.",
+           "published": "@{me}: review published ({n} comments). Made by {tool} ({model}).",
            "model_unknown": "model unknown",
 }
 
@@ -1409,7 +1414,15 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
         raise
     agent = findings.get("agent") or {}
     M = msg_for(cfg)
-    body = (f"<!-- wiz-review:drafts-ready sha={refs['head_sha']} -->\n" + M["ready"].format(
+    published = False
+    if cfg.get("auto_publish", True):
+        try:
+            gl.publish_all(project, iid)
+            published = True
+        except Exception:  # drafts stay in GitLab: fall back to "drafts ready" so the reviewer can publish them
+            pass
+    kind, text = ("done", M["published"]) if published else ("drafts-ready", M["ready"])
+    body = (f"<!-- wiz-review:{kind} sha={refs['head_sha']} -->\n" + text.format(
         me=me, n=len(created), tool=agent.get("tool") or AGENT_TOOL, model=agent.get("model") or M["model_unknown"]))
     try:
         gl.post_note(project, iid, body)
@@ -1422,8 +1435,14 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
         except Exception:
             stored = False
         if not stored:
-            rollback()
-            raise
+            if published:
+                gl.post_note(project, iid, body)  # comments are live: one more try beats a duplicate review
+            else:
+                rollback()
+                raise
+    if published:
+        notify(f"Review published: {project}!{iid} ({len(created)})", sound=True)
+        return len(created)
     _todo(gl, project, iid)
     notify(f"Review drafts ready: {project}!{iid} ({len(created)})", sound=True)
     counts = {}
