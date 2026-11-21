@@ -180,18 +180,18 @@ def main():
     pavlo.wr("tick")
     time.sleep(2)
     check("rerun without new commits: answered, no Claude run",
-          any("нових комітів немає" in b for b in bodies(gl, key)))
+          any("no new commits" in b for b in bodies(gl, key)))
 
     # 7. nobody to review -> author's machine runs the fallback review
     key2 = (PROJECT, 2)
     gl.add_mr(PROJECT, 2, "olena", "feat2", "develop", base, head, "Second")
-    gl.add_note(key2, "olena", "<!-- wiz-review:request -->\n**Навіщо:** x\n**Як тестували:** y\n**Питання автора:** —")
+    gl.add_note(key2, "olena", "<!-- wiz-review:request -->\n**Why:** x\n**How tested:** y\n**Author's questions:** —")
     olena.wr("tick")
     check("fallback marker posted for MR without reviewers", has_marker(gl, key2, "fallback"))
     print("   waiting for the fallback review…")
-    ok = wait_for(lambda: any(b.startswith("🤖 **Авто-рев'ю") for b in bodies(gl, key2)), timeout=180)
+    ok = wait_for(lambda: any(b.startswith("🤖 **Auto-review") for b in bodies(gl, key2)), timeout=180)
     check("fallback review posted as a plain note", ok, str(bodies(gl, key2)))
-    fb = next((b for b in bodies(gl, key2) if b.startswith("🤖 **Авто-рев'ю")), "")
+    fb = next((b for b in bodies(gl, key2) if b.startswith("🤖 **Auto-review")), "")
     check("fallback note names tool and model (no cost in MR text)", "🤖 _wiz-review · Claude Code · claude-" in fb.rstrip()[-140:]
           and "tokens" not in fb.rstrip()[-140:], fb[-160:])
     print("   fallback:", fb[:200].replace("\n", " "))

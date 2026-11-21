@@ -590,7 +590,7 @@ Rules:
 - `suggestion` (optional): exact replacement text for that single line.
 - `summary`: 2-5 sentences: what the change does, your verdict, and anything the author asked about.
   If the request note lists acceptance criteria, also say which ones the change meets, which it misses, and which you cannot tell.
-- The author's "Рішення і компроміси" in the request note are CLAIMS TO VERIFY against the code, not facts. Flag any
+- The author's "Decisions and trade-offs" in the request note are CLAIMS TO VERIFY against the code, not facts. Flag any
   contradiction between a claim and the code.
 {mode}
 Return ONLY the JSON object required by the schema."""
@@ -658,7 +658,7 @@ def build_packet(meta, request_note, diff_text, cfg, since=None, kind="review"):
     parts = [INSTRUCTIONS.format(subject="one GitLab merge request", whose="reviewer's", tools_rule=rule,
                                  mode=FALLBACK_MODE if kind == "fallback" else ""),
              f"\n## Merge request\n{meta['url']}\nTarget branch: {meta['target']}"]
-    parts.append("## Language\nWrite the body of each finding and the summary in Ukrainian.")
+    parts.append("## Language\nWrite the body of each finding and the summary in Simplified Technical English (STE): short sentences, active voice, common words, no idioms.")
     if since:
         parts.append(f"This is a re-review: only changes after commit {since} are shown. Do not repeat earlier findings.")
     parts.append("## Title\n" + _untrusted(meta.get("title", "")))
@@ -1147,15 +1147,15 @@ def request_note(why, tested, questions, criteria=None, decisions=None, clone_pr
         raise ValueError("why and tested are required")
     if criteria is not None and (not isinstance(criteria, list) or not all(isinstance(c, str) for c in criteria)):
         raise ValueError("criteria must be a list of strings")
-    text = (f"<!-- wiz-review:request -->\n**Навіщо:** {why.strip()}\n**Як тестували:** {tested.strip()}\n"
-            f"**Питання автора:** {(questions or '').strip() or '—'}")
+    text = (f"<!-- wiz-review:request -->\n**Why:** {why.strip()}\n**How tested:** {tested.strip()}\n"
+            f"**Author's questions:** {(questions or '').strip() or '—'}")
     items = [" ".join(c.split())[:MAX_CRITERION_CHARS] for c in criteria or [] if c.strip()][:MAX_CRITERIA]
     if items:
-        text += f"\n**Критерії приймання:**\n" + "\n".join(f"- {c}" for c in items)
+        text += f"\n**Acceptance criteria:**\n" + "\n".join(f"- {c}" for c in items)
     if decisions is not None and not isinstance(decisions, str):
         raise ValueError("decisions must be a string")
     if (decisions or "").strip():
-        text += "\n**Рішення і компроміси:**\n" + decisions.strip()[:MAX_DECISIONS_CHARS]
+        text += "\n**Decisions and trade-offs:**\n" + decisions.strip()[:MAX_DECISIONS_CHARS]
     if related is not None and (not isinstance(related, list) or not all(isinstance(u, str) for u in related)):
         raise ValueError("related must be a list of MR links")
     links = []
@@ -1165,11 +1165,11 @@ def request_note(why, tested, questions, criteria=None, decisions=None, clone_pr
             raise ValueError(f"related MR is not a merge request link on {GITLAB_HOST}: {u[:120]}")
         links.append(u)
     if links:  # linked MRs, possibly in other repos: the review does NOT check their state, the reviewer does
-        text += "\n**Пов'язані MR** (можуть бути в інших репо; цей рев'ю їхній стан не перевіряє):\n" + \
+        text += "\n**Related MRs** (they can be in other repos; this review does not check their state):\n" + \
                 "\n".join(f"- {u}" for u in links[:MAX_RELATED])
     if clone_project:  # the reviewer has no local clone yet: say so before the pickup, not after "no local checkout"
-        text += (f"\n**Перед рев'ю:** у вас немає клону `{clone_project}`. Клонуйте його в папку, яка входить до ваших "
-                 f"`roots` (`repos --root <папка>`). Без клону рев'ю не почнеться.")
+        text += (f"\n**Before the review:** you have no clone of `{clone_project}`. Clone it into a folder in your "
+                 f"`roots` (`repos --root <folder>`). The review does not start without a clone.")
     if find_secrets(text):
         raise SecretLeak("the request note contains something that looks like a secret")
     return text
@@ -1232,14 +1232,14 @@ def mr_info(raw):
             "target": raw["target_branch"], "title": raw.get("title", "")}
 
 
-MSG = {"pickup": "рев'ю почато", "summary": "wiz-review — підсумок",
-           "fallback_title": "🤖 **Авто-рев'ю на машині автора** (ніхто з рев'юерів не взявся)",
-           "fallback_start": "🤖 Ніхто з рев'юерів не взявся — запускаю авто-рев'ю на машині автора.",
-           "failed": "⚠️ @{me}: wiz-review не вдалося (`{msg}`). Буде одна автоматична повторна спроба.",
-           "fallback_failed": "⚠️ Запасне авто-рев'ю не вдалося (`{msg}`). Повторити: ще раз `/wiz-review:request-review` "
-                              "(запустить новий цикл, а за потреби й запасне рев'ю).",
-           "ready": "@{me}: чернетки рев'ю готові ({n}), зробив {tool} ({model}). Опублікуй або відредагуй у GitLab.",
-           "model_unknown": "модель невідома",
+MSG = {"pickup": "review started", "summary": "wiz-review summary",
+           "fallback_title": "🤖 **Auto-review on the author's machine** (no reviewer took it)",
+           "fallback_start": "🤖 No reviewer took the review. Starting an auto-review on the author's machine.",
+           "failed": "⚠️ @{me}: wiz-review failed (`{msg}`). One automatic retry follows.",
+           "fallback_failed": "⚠️ The fallback auto-review failed (`{msg}`). To retry, run `/wiz-review:request-review` again "
+                              "(it starts a new cycle and, if needed, the fallback review).",
+           "ready": "@{me}: review drafts are ready ({n}). Made by {tool} ({model}). Publish or edit them in GitLab.",
+           "model_unknown": "model unknown",
 }
 
 
@@ -1261,15 +1261,15 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
 
     if ready and _last(ms, me, {"done"}, after=ready.at) is None and not gl.drafts(project, iid):
         # the reviewer published or deleted every draft by hand: the round is closed
-        gl.post_note(project, iid, f"<!-- wiz-review:done sha={ready.sha} -->\n✅ @{me}: рев'юер опрацював чернетки.")
+        gl.post_note(project, iid, f"<!-- wiz-review:done sha={ready.sha} -->\n✅ @{me}: the reviewer handled the drafts.")
         return "closed"
 
     if action in ("review", "retry", "rerun"):
         repo = find_repo(project, cfg, ctx)
         if not repo:
             if not st.get("no_checkout_noted"):
-                gl.post_note(project, iid, f"@{me} wiz-review: немає локального чекауту для `{project}` — "
-                             "склонуй репо (в одну з папок `roots`), далі все підхопиться саме.")
+                gl.post_note(project, iid, f"@{me} wiz-review: no local checkout for `{project}`. "
+                             "Clone the repo into one of the `roots` folders. The review then starts by itself.")
                 st["no_checkout_noted"] = True
             st["_due"] = (ctx["now"] + minutes(NO_CHECKOUT_RETRY)).isoformat()  # look again, MR itself may not change
             return "no-checkout"
@@ -1277,7 +1277,7 @@ def _reviewer_step(gl, cfg, ctx, info, notes, st, data):
         since = out.sha if action == "rerun" and out else None
         if since and since == info["sha"]:  # rerun asked but nothing new: answer without spending tokens
             _pickup(gl, info, me, cfg=cfg)
-            gl.post_note(project, iid, f"<!-- wiz-review:done sha={since} -->\n✅ @{me}: нових комітів немає — рев'ю актуальне.")
+            gl.post_note(project, iid, f"<!-- wiz-review:done sha={since} -->\n✅ @{me}: no new commits. The review is up to date.")
             return "rerun-noop"
         if ctx["running"] >= cfg["max_concurrent"]:
             st["_deferred"] = True
@@ -1297,7 +1297,7 @@ def _author_step(gl, cfg, ctx, info, notes, st, data):
     for m in parse_markers(notes):
         if m.kind == "done" and m.author in info["reviewers"] and m.note_id not in seen:
             seen.append(m.note_id)
-            ctx["notify"](f"Рев'ю готове: {project}!{iid} (@{m.author})")
+            ctx["notify"](f"Review ready: {project}!{iid} (@{m.author})")
     if author_decide(data) != "fallback":
         return None
     repo = find_repo(project, cfg, ctx)
@@ -1381,7 +1381,7 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
             body += "\n\n" + "\n".join(_line(f) for f in fs)
         gl.post_note(project, iid, body + f"\n\n{agent_tag(findings.get('agent'))}")
         _todo(gl, project, iid)
-        notify(f"Авто-рев'ю готове: {project}!{iid}", sound=True)
+        notify(f"Auto-review ready: {project}!{iid}", sound=True)
         return 0
     inline, summary = plan_notes(findings, diffmap, refs, cfg)
     created, failed = [], []
@@ -1425,7 +1425,7 @@ def finish_job(gl, job, findings, diffmap, refs, cfg, notify=notify):
             rollback()
             raise
     _todo(gl, project, iid)
-    notify(f"Чернетки рев'ю готові: {project}!{iid} ({len(created)})", sound=True)
+    notify(f"Review drafts ready: {project}!{iid} ({len(created)})", sound=True)
     counts = {}
     for f in findings["findings"]:
         if f["confidence"] != "low":
@@ -1658,8 +1658,8 @@ def run_job(job, gl=None, cfg=None):
         rec.update(diff_lines=pst["changed_lines"], truncated=pst["truncated"])
         findings = None
         if pst["changed_lines"] == 0:
-            findings = {"summary": "Немає змін для рев'ю (лише згенеровані або lock-файли).", "findings": [],
-                        "agent": {"tool": AGENT_TOOL, "model": "модель не запускалась"}}
+            findings = {"summary": "No changes to review (only generated or lock files).", "findings": [],
+                        "agent": {"tool": AGENT_TOOL, "model": "model did not run"}}
         else:
             model = pick_model(job, cfg)
             rec["model"] = model
